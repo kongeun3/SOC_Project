@@ -40,18 +40,21 @@ class BrowserPage:
                 self.errors.append(message["params"])
             elif message.get("method") == "Fetch.requestPaused":
                 event = message["params"]
-                is_chat = event["request"]["url"].endswith("/api/chat")
+                is_chat = event["request"]["url"].endswith("/api/jobs/chat")
+                submitted = json.loads(event["request"].get("postData", "{}"))
+                assert submitted.get("analysis_id"), "AI requests must identify their analysis"
                 if is_chat:
                     self.chat_requests.append(
                         json.loads(event["request"].get("postData", "{}"))
                     )
-                    body = {"reply": "브라우저 연결 점검 응답입니다."}
+                    body = {"job_id": "browser-chat", "status": "completed", "result": {"reply": "브라우저 연결 점검 응답입니다."}}
                     status = 200
                 elif self.ai_error:
                     body, status = {"error": "AI 응답 실패 점검"}, 503
                 else:
                     body, status = {
-                        "diagnosis": "## 연결 점검\n\nAI 응답을 안전하게 표시합니다. <img src=x onerror=alert(1)>"
+                        "job_id": "browser-diagnose", "status": "completed",
+                        "result": {"diagnosis": "## 연결 점검\n\nAI 응답을 안전하게 표시합니다. <img src=x onerror=alert(1)>"}
                     }, 200
                 self.call(
                     "Fetch.fulfillRequest",
@@ -160,8 +163,8 @@ def main():
                 "Fetch.enable",
                 {
                     "patterns": [
-                        {"urlPattern": "*/api/diagnose"},
-                        {"urlPattern": "*/api/chat"},
+                        {"urlPattern": "*/api/jobs/diagnose"},
+                        {"urlPattern": "*/api/jobs/chat"},
                     ]
                 },
             )
@@ -262,6 +265,45 @@ def main():
                 "document.documentElement.scrollWidth <= window.innerWidth"
             ), "Mobile overflow"
             page.screenshot("html-mobile.png")
+            # Two tabs represent independent visitors, including identical upload names.
+            other_target = requests.put(
+                f"http://127.0.0.1:{port}/json/new?about:blank"
+            ).json()
+            other = BrowserPage(other_target["webSocketDebuggerUrl"])
+            try:
+                other.call("Runtime.enable")
+                other.call("Page.enable")
+                other.call("Page.navigate", {"url": CLIENT_URL + "/"})
+                other.wait("document.querySelector('#connectionStatus')?.dataset.state === 'ready'")
+                other_root = other.call("DOM.getDocument")["root"]["nodeId"]
+                other_input = other.call("DOM.querySelector", {
+                    "nodeId": other_root, "selector": "#fileInput"
+                })["nodeId"]
+                other.call("DOM.setFileInputFiles", {
+                    "nodeId": other_input, "files": [str(ROOT / "test" / "test.jpg")]
+                })
+                other.wait("!document.querySelector('#analyzeButton').disabled")
+                for visitor, modulus in ((page, 5000), (other, 7000)):
+                    visitor.evaluate(
+                        "document.querySelector('#autoDiagnose').checked=false;"
+                        "document.querySelector('#meshSize').value='30';"
+                        "document.querySelector('#captureDate').value='2026-05-08';"
+                        "if(!document.querySelector('#customProps').checked) document.querySelector('#customProps').click();"
+                        f"document.querySelector('#elasticModulus').value='{modulus}';"
+                    )
+                page.evaluate("document.querySelector('#analyzeButton').click()")
+                other.evaluate("document.querySelector('#analyzeButton').click()")
+                for visitor, expected in ((page, "5,000"), (other, "7,000")):
+                    visitor.wait(
+                        "!document.querySelector('#downloadButton').disabled && document.querySelector('#operationProgress').hidden",
+                        timeout=300,
+                    )
+                    assert visitor.evaluate("document.querySelector('#errorMessage').hidden")
+                    assert expected in visitor.evaluate("document.querySelector('#resultProps').textContent")
+                    visitor.wait("[...document.querySelectorAll('[data-result-image]')].every(i=>i.naturalWidth>0 && i.src.startsWith('blob:'))")
+                    assert not visitor.errors, visitor.errors
+            finally:
+                other.ws.close()
             page.call("Page.navigate", {"url": (ROOT / "web" / "index.html").as_uri()})
             page.wait(
                 "!!document.querySelector('#previewNotice') && !document.querySelector('#previewNotice').hidden"
@@ -278,6 +320,7 @@ def main():
                 "chat_api_wiring_mocked": "PASS",
                 "json_download": "PASS",
                 "mobile_layout": "PASS",
+                "two_tabs_same_filename_separate_results": "PASS",
                 "local_file_designer_preview": "PASS",
                 "javascript_exceptions": page.errors,
             }

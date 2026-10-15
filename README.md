@@ -145,15 +145,49 @@ OLLAMA_BASE=http://127.0.0.1:11434
 OLLAMA_MODEL=exaone3.5:7.8b
 OLLAMA_AUTO_START=true
 FLET_SECRET_KEY=프로젝트에_생성된_값_유지
+JOB_QUEUE_CAPACITY=32
+SESSION_TTL_SECONDS=86400
+MAX_SESSIONS=256
+MAX_PENDING_PER_SESSION=4
+MAX_JOBS_PER_SESSION=128
+MAX_UPLOADS_PER_SESSION=64
+MAX_UPLOAD_MB=32
 ```
 
 - **SERVER_URL**: 화면 접속 주소이자 서버 바인딩 주소. 예: `http://localhost:8080`.
 - **OLLAMA_BASE / OLLAMA_MODEL**: 로컬 AI 서비스 주소와 모델 이름.
 - **OLLAMA_AUTO_START**: 로컬 Ollama가 꺼져 있으면 자동으로 시작할지 여부.
 - **FLET_SECRET_KEY**: 파일 업로드 URL 서명 키. 이 프로젝트의 `.env`에는 무작위 키를 생성해 두었습니다.
+- **JOB_QUEUE_CAPACITY**: 서버 전체 작업 대기열 용량. 한도를 넘으면 요청을 거절하고 나중에 다시 시도하도록 안내합니다.
+- **SESSION_TTL_SECONDS**: 활동이 없는 세션의 유효 시간(초). 기본값은 24시간이며, 실행 중이거나 대기 중인 작업이 있는 세션은 유지됩니다.
+- **MAX_SESSIONS / MAX_PENDING_PER_SESSION**: 서버의 최대 세션 수 / 세션별 최대 대기·실행 작업 수.
+- **MAX_JOBS_PER_SESSION / MAX_UPLOADS_PER_SESSION**: 세션별 최대 작업 수 / 업로드 수.
+- **MAX_UPLOAD_MB**: 파일 하나의 최대 업로드 용량(MB).
 
 `.env`는 Git에 포함되지 않습니다. 다른 PC에서는 `.env.example`을 `.env`로 복사하고 키를 새로 생성하세요.
 이미 설정된 운영체제 환경 변수는 `.env`보다 우선합니다.
+
+## 여러 사용자 동시 사용
+
+웹 화면과 기존 Flet 화면 모두 사용자별 API 세션을 사용합니다. 업로드마다 파일 ID를,
+분석마다 분석 ID를 발급하므로 파일 이름이 같아도 원본·그래프·AI 진단·추가 질문이 섞이지 않습니다.
+분석 결과와 이미지 조회에도 해당 세션이 필요합니다.
+
+여러 사용자가 동시에 접속하고 파일을 올리거나 결과를 조회할 수 있습니다.
+SAM2·FEM·그래프 생성과 Ollama 진단·채팅은 **하나의 작업 대기열에서 순서대로 처리**합니다.
+이 PC의 GPU 메모리와 공유 모델을 보호하기 위한 구성으로, 여러 분석을 GPU에서 동시에 계산하는 방식은 아닙니다.
+먼저 제출한 작업을 처리하는 동안 다른 사용자는 화면에서 대기 순서를 확인할 수 있습니다.
+한 사람의 분석이 끝나면 다음 작업이 실행되며, 자동 AI 진단은 해당 분석 결과를 기준으로 별도 작업으로 제출됩니다.
+
+`python main2.py` 또는 `python main.py`로 **서버 프로세스 하나만** 실행하세요.
+세션과 대기열을 프로세스 메모리에서 관리하므로 `uvicorn --workers`를 늘리거나
+여러 서버 프로세스를 같은 결과 폴더에 연결하는 구성은 지원하지 않습니다.
+기본 주소 `127.0.0.1`은 이 PC에서만 접속할 수 있습니다. 같은 네트워크의 다른 PC에서도
+사용하려면 `.env`의 `SERVER_URL=http://0.0.0.0:8000`으로 실행하고 서버 PC의 IP 주소로 접속하세요.
+
+서버를 재시작하거나 세션이 만료되면 파일을 다시 업로드해야 합니다.
+이전에 저장한 결과 파일은 `result/jobs/`에 남지만, 이전 세션 ID로 웹에서 다시 조회할 수는 없습니다.
+대기열이 가득 차면 자동 재제출하지 않으므로 잠시 후 버튼을 다시 눌러주세요.
 
 ## 폴더 구조
 
@@ -174,10 +208,12 @@ SOC_Project/
 │  ├─ check_runtime.py  모델·분석 API 점검
 │  └─ check_web.py      실행 중인 웹 화면 점검
 ├─ result/
-│  ├─ uploads/       업로드 원본
-│  ├─ web_uploads/   브라우저 업로드 파일
-│  ├─ images/        최근 분석 그래프
-│  ├─ reports/       분석별 JSON · 최근 AI 진단 · 검증 기록
+│  ├─ jobs/          세션별 업로드 · 작업별 결과/그래프/AI 진단
+│  │  └─ <저장 ID>/
+│  │     ├─ uploads/           업로드 ID별 원본
+│  │     └─ <작업 ID>/         job.json · result.json · images/ 등
+│  ├─ web_uploads/   Flet 브라우저 업로드 임시 전달 파일(고유 파일명)
+│  ├─ reports/       점검 스크립트의 검증 기록
 │  ├─ logs/          server.log 등 실행 로그
 │  └─ fem/           명령행 FEM 분석 결과
 └─ past/             기존 프로젝트·실행 파일·결과·참고 자료
@@ -190,7 +226,8 @@ BAT 파일과 이전 실행 도구는 `past/launchers_v2`에 보관했으며, PS
 ## 사용과 결과 확인
 
 화면에서 `test/test.jpg` 또는 온도 CSV를 선택한 다음 **분석 시작**을 누릅니다.
-분석 JSON은 실행 시각별로 저장됩니다. `result/images`와 `latest_diagnosis.txt`는 최신 결과로 갱신됩니다.
+분석 JSON과 그림은 `result/jobs/<저장 ID>/<작업 ID>/result.json`, `images/`에 저장됩니다.
+AI 작업의 `diagnosis.txt`와 `chat.json`도 각 작업 폴더에 저장합니다. 다른 사용자의 결과를 덮어쓰지 않습니다.
 API 상태는 설정한 주소의 `/api/`, API 문서는 `/api/docs`에서 확인할 수 있습니다.
 실행 로그는 `result/logs/server.log`에 저장됩니다.
 
@@ -211,6 +248,15 @@ python -m pip install -r requirements.txt
 python test/check_runtime.py
 ```
 
+동시 요청과 사용자별 결과 분리를 점검하려면:
+
+```bat
+python -X utf8 test/check_concurrency.py
+```
+
+이 검사는 모델 계산과 Ollama 응답을 모의 처리하고, 실제 API·작업 대기열을 사용해
+두 사용자의 동시 요청, 파일·결과 접근 권한, 대기 순서, 실패 후 복구를 검증합니다.
+
 `python main.py`로 서버를 실행한 상태에서 화면을 점검하려면:
 
 ```bat
@@ -219,10 +265,14 @@ python test/check_web.py --ai
 python test/check_upload.py
 ```
 
+Flet 점검은 페이지별 파일 업로드부터 분석 작업과 보호된 결과 이미지까지 확인합니다.
+`check_upload.py`는 두 사용자가 같은 파일 이름으로 동시에 업로드해도 충돌하지 않는지 검사합니다.
+`check_web.py --ai`는 해당 페이지에 새 AI 진단문이 표시되었는지도 확인합니다.
+
 HTML 버전은 `python main2.py`로 실행하고 `python test/check_html.py`로 점검합니다.
 Edge 또는 Chrome을 화면 없는 모드로 열어 실제 파일 업로드·SAM2/FEM 분석·JSON 다운로드·모바일 배치를 확인합니다.
 이 점검에서 AI 진단과 채팅 응답은 테스트 데이터로 대체하며, 실제 AI 모델을 다시 호출하지 않습니다.
 화면 캡처는 `result/browser`, 검증 결과는 `result/reports/html_ui_check.json`에 저장됩니다.
 
-점검은 실제 분석을 실행하므로 최신 결과 파일이 갱신됩니다.
+점검은 실제 분석을 실행하며, 실행한 세션·작업에 대한 결과 파일이 새로 저장됩니다.
 CSV 일괄 분석은 `python -m core.thermal_stress_fem_system past/csv --all`로 실행할 수 있습니다.

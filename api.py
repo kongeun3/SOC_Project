@@ -13,25 +13,31 @@ SOC 졸업설계 — 도로 포장 열응력 진단 시스템 v2.0
 """
 
 import os
-import shutil
 import json
-from uuid import uuid4
+from pathlib import Path
+from typing import Literal
 from config import (
     WEIGHTS_DIR,
-    STATIC_DIR,
-    UPLOAD_DIR,
-    REPORT_DIR,
+    JOBS_DIR,
+    JOB_QUEUE_CAPACITY,
+    SESSION_TTL_SECONDS,
+    MAX_SESSIONS,
+    MAX_JOBS_PER_SESSION,
+    MAX_UPLOADS_PER_SESSION,
+    MAX_PENDING_PER_SESSION,
+    MAX_UPLOAD_MB,
     OLLAMA_BASE,
     OLLAMA_MODEL,
 )
+from core.job_manager import JobManager, JobError
 import requests
 import traceback
 import numpy as np
 from datetime import date, datetime
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Header, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field, field_validator
 from PIL import Image as PILImage, ExifTags
 
 # ── [1] 경로 자동 설정 ──────────────────────────────────────
@@ -106,12 +112,15 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
-STATIC_DIR = str(STATIC_DIR)
-os.makedirs(STATIC_DIR, exist_ok=True)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-uploaded_image_path = None
-last_analysis = None
+job_manager = JobManager(
+    JOBS_DIR,
+    queue_capacity=JOB_QUEUE_CAPACITY,
+    session_ttl=SESSION_TTL_SECONDS,
+    max_sessions=MAX_SESSIONS,
+    max_jobs_per_session=MAX_JOBS_PER_SESSION,
+    max_uploads_per_session=MAX_UPLOADS_PER_SESSION,
+    max_pending_per_session=MAX_PENDING_PER_SESSION,
+)
 tuner = None
 sam_transform = None
 DEVICE = None
@@ -292,7 +301,7 @@ def get_capture_date(image_path: str, override: str | None = None) -> tuple[str,
 
 # ── [8] 시각화 ──────────────────────────────────────────────
 def save_pipeline_image(
-    image_np, expanded_mask, thermal_matrix, risk_map, nodes, elements
+    image_np, expanded_mask, thermal_matrix, risk_map, nodes, elements, output_dir
 ):
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
     axes[0].imshow(image_np)
@@ -316,7 +325,7 @@ def save_pipeline_image(
     draw_risk_overlay(axes[3], image_np, risk_map, nodes, elements)
     plt.tight_layout()
     plt.savefig(
-        os.path.join(STATIC_DIR, "pipeline_result.png"),
+        os.path.join(output_dir, "pipeline_result.png"),
         dpi=80,
         bbox_inches="tight",
         facecolor="white",
@@ -380,13 +389,13 @@ def draw_risk_overlay(ax, image_np, risk_map, nodes, elements):
     ax.axis("off")
 
 
-def save_risk_overlay(image_np, risk_map, nodes, elements, n_rows, n_cols):
+def save_risk_overlay(image_np, risk_map, nodes, elements, n_rows, n_cols, output_dir):
     """원본 이미지 위에 위험 위치를 시각적으로 오버레이."""
     fig, ax = plt.subplots(1, 1, figsize=(10, 10))
     draw_risk_overlay(ax, image_np, risk_map, nodes, elements)
     plt.tight_layout()
     plt.savefig(
-        os.path.join(STATIC_DIR, "risk_overlay.png"),
+        os.path.join(output_dir, "risk_overlay.png"),
         dpi=80,
         bbox_inches="tight",
         facecolor="white",
@@ -394,7 +403,7 @@ def save_risk_overlay(image_np, risk_map, nodes, elements, n_rows, n_cols):
     plt.close(fig)
 
 
-def save_distribution_chart(risk_map, S_t):
+def save_distribution_chart(risk_map, S_t, output_dir):
     """응력비 분포 히스토그램."""
     fig, ax = plt.subplots(1, 1, figsize=(10, 5))
     bins = np.linspace(0, max(1.5, risk_map.max() * 1.05), 40)
@@ -427,7 +436,7 @@ def save_distribution_chart(risk_map, S_t):
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(
-        os.path.join(STATIC_DIR, "distribution.png"),
+        os.path.join(output_dir, "distribution.png"),
         dpi=80,
         bbox_inches="tight",
         facecolor="white",
@@ -435,7 +444,7 @@ def save_distribution_chart(risk_map, S_t):
     plt.close(fig)
 
 
-def save_donut_chart(critical, warning, safe, total):
+def save_donut_chart(critical, warning, safe, total, output_dir):
     """Critical/Warning/Safe 도넛 차트."""
     fig, ax = plt.subplots(1, 1, figsize=(5, 5), subplot_kw=dict(aspect="equal"))
     sizes = [critical, warning, safe]
@@ -467,7 +476,7 @@ def save_donut_chart(critical, warning, safe, total):
     ax.text(0, -0.18, "총 요소", ha="center", va="center", fontsize=11, color="#607D8B")
     plt.tight_layout()
     plt.savefig(
-        os.path.join(STATIC_DIR, "donut.png"),
+        os.path.join(output_dir, "donut.png"),
         dpi=80,
         bbox_inches="tight",
         facecolor="white",
@@ -475,7 +484,7 @@ def save_donut_chart(critical, warning, safe, total):
     plt.close(fig)
 
 
-def save_gauge_chart(max_ratio, S_t):
+def save_gauge_chart(max_ratio, S_t, output_dir):
     """위험도 게이지 차트 (반원형)."""
     fig, ax = plt.subplots(1, 1, figsize=(7, 4))
     max_ratio_clipped = min(max_ratio, 1.5)
@@ -536,7 +545,7 @@ def save_gauge_chart(max_ratio, S_t):
     ax.axis("off")
     plt.tight_layout()
     plt.savefig(
-        os.path.join(STATIC_DIR, "gauge.png"),
+        os.path.join(output_dir, "gauge.png"),
         dpi=80,
         bbox_inches="tight",
         facecolor="white",
@@ -544,7 +553,7 @@ def save_gauge_chart(max_ratio, S_t):
     plt.close(fig)
 
 
-def save_relaxation_curve(props, T_mean, max_stress_ratio):
+def save_relaxation_curve(props, T_mean, max_stress_ratio, output_dir):
     """응력 이력 곡선 — t_relax (이완시간)에 따른 E_eff 및 응력 변화."""
     times_h = np.linspace(0.5, 12, 50)  # 0.5h ~ 12h
     times_s = times_h * 3600
@@ -589,7 +598,7 @@ def save_relaxation_curve(props, T_mean, max_stress_ratio):
     fig.legend(loc="upper right", bbox_to_anchor=(0.88, 0.88), fontsize=10)
     plt.tight_layout()
     plt.savefig(
-        os.path.join(STATIC_DIR, "relaxation_curve.png"),
+        os.path.join(output_dir, "relaxation_curve.png"),
         dpi=80,
         bbox_inches="tight",
         facecolor="white",
@@ -745,24 +754,10 @@ def root():
     }
 
 
-@app.post("/upload")
-async def upload(file: UploadFile = File(...)):
-    global uploaded_image_path
-    name = os.path.basename((file.filename or "upload.bin").replace("\\", "/"))
-    path = str(UPLOAD_DIR / f"{uuid4().hex}_{name}")
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    uploaded_image_path = path
-    print(f"[Upload] 저장: {path}")
-    return {
-        "status": "uploaded",
-        "path": path,
-        "ext": os.path.splitext(name)[1].lower(),
-    }
-
-
-@app.get("/analyze")
-def analyze(
+def run_analysis(
+    image_path,
+    output_dir,
+    analysis_id,
     capture_date: str | None = None,
     scenario: str = "default",
     mesh_size: int = 40,
@@ -771,11 +766,13 @@ def analyze(
     alpha_override: float | None = None,
     st_override: float | None = None,
 ):
-    """시나리오/격자/물성 옵션을 받아 FEM 해석 수행."""
-    global uploaded_image_path, last_analysis
+    """Run inside the resource worker using immutable input and a private output folder."""
+    image_path = str(image_path)
+    images_dir = Path(output_dir) / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
     try:
-        if not uploaded_image_path or not os.path.exists(uploaded_image_path):
-            return {"error": "파일이 없습니다. 먼저 이미지를 업로드해주세요."}
+        if not os.path.isfile(image_path):
+            raise ValueError("파일이 없습니다. 먼저 이미지를 업로드해주세요.")
 
         scenario_key = scenario if scenario in SCENARIOS else "default"
         scen = SCENARIOS[scenario_key]
@@ -788,7 +785,7 @@ def analyze(
         print(f"[Analyze] 시작 — 시나리오={scenario_key}, 격자={mesh_size}x{mesh_size}")
 
         # 촬영일 / 물성
-        cap_date, cap_src = get_capture_date(uploaded_image_path, capture_date)
+        cap_date, cap_src = get_capture_date(image_path, capture_date)
         props = get_material_properties(cap_date)
 
         # 사용자 물성 오버라이드
@@ -807,7 +804,7 @@ def analyze(
         n_rows = n_cols = mesh_size
 
         # 입력 모드 결정 (CSV 자동 감지)
-        ext = os.path.splitext(uploaded_image_path)[1].lower()
+        ext = os.path.splitext(image_path)[1].lower()
         input_mode = (
             "csv_absolute" if (ext == ".csv" and CSV_LOADER_OK) else "png_grayscale"
         )
@@ -815,9 +812,9 @@ def analyze(
 
         # ── SAM2 추론 (CSV 입력이면 시각화용 임시 PNG 생성) ──
         if input_mode == "csv_absolute":
-            T_csv, csv_meta = csv_to_temperature(uploaded_image_path, n_rows, n_cols)
+            T_csv, csv_meta = csv_to_temperature(image_path, n_rows, n_cols)
             # CSV는 SAM2 검출이 의미 약함 → 빈 마스크 사용 + 시각화용 가짜 이미지
-            T_full, _ = csv_to_temperature(uploaded_image_path, 480, 640)
+            T_full, _ = csv_to_temperature(image_path, 480, 640)
             norm = (T_full - T_full.min()) / (T_full.max() - T_full.min() + 1e-9)
             image_np = (plt.get_cmap("inferno")(norm)[:, :, :3] * 255).astype(np.uint8)
             pred_mask = np.zeros((480, 640), dtype=np.uint8)
@@ -830,10 +827,9 @@ def analyze(
         else:
             print("[Analyze] SAM2 추론 중...")
             if not sam2_available:
-                return {
-                    "error": "SAM2 모델을 사용할 수 없습니다. result/logs/backend.log를 확인하세요."
-                }
-            image_pil = PILImage.open(uploaded_image_path).convert("RGB")
+                raise RuntimeError("SAM2 모델을 사용할 수 없습니다. 서버 로그를 확인하세요.")
+            with PILImage.open(image_path) as source:
+                image_pil = source.convert("RGB")
             # ★ 속도 개선: 큰 이미지는 미리 축소 (SAM2가 어차피 1024로 리사이즈하므로)
             if max(image_pil.size) > 1280:
                 image_pil.thumbnail((1280, 1280), PILImage.LANCZOS)
@@ -933,7 +929,8 @@ def analyze(
 
         try:
             save_pipeline_image(
-                image_np, expanded_mask, thermal_matrix, risk_map, nodes, elements
+                image_np, expanded_mask, thermal_matrix, risk_map, nodes, elements,
+                images_dir,
             )
             visualize_results(
                 nodes,
@@ -944,20 +941,26 @@ def analyze(
                 n_rows,
                 n_cols,
                 props,
-                out=STATIC_DIR,
+                out=str(images_dir),
             )
-            save_risk_overlay(image_np, risk_map, nodes, elements, n_rows, n_cols)
+            save_risk_overlay(image_np, risk_map, nodes, elements, n_rows, n_cols, images_dir)
             save_donut_chart(
                 metrics["fem"]["critical"],
                 metrics["fem"]["warning"],
                 metrics["fem"]["safe"],
                 metrics["fem"]["total"],
+                images_dir,
             )
-            save_gauge_chart(metrics["fem"]["max_ratio"], props["S_t"])
+            save_gauge_chart(metrics["fem"]["max_ratio"], props["S_t"], images_dir)
         except Exception as ve:
             print(f"[Analyze] 시각화 일부 실패(무시): {ve}")
 
-        last_analysis = {
+        analysis = {
+            "analysis_id": analysis_id,
+            "images": {
+                image.name: f"/analyses/{analysis_id}/images/{image.name}"
+                for image in images_dir.glob("*.png")
+            },
             "result": metrics,
             "scenario": scenario_key,
             "scenario_info": {"name": scen["name"], "desc": scen["desc"]},
@@ -981,15 +984,15 @@ def analyze(
         print(
             f"[Analyze] 완료 — 등급={metrics['grade']}, 최대 SR={metrics['fem']['max_ratio']}"
         )
-        report_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + ".json"
-        with open(REPORT_DIR / report_name, "w", encoding="utf-8") as report:
-            json.dump(last_analysis, report, ensure_ascii=False, indent=2)
-        return last_analysis
+        return analysis
 
     except Exception as ex:
         err_detail = traceback.format_exc()
         print(f"[Analyze] 예외:\n{err_detail}")
-        return {"error": str(ex), "detail": err_detail}
+        raise RuntimeError(f"분석 실패: {ex}") from ex
+    finally:
+        # Matplotlib is used only by this worker. Release failed and completed figures.
+        plt.close("all")
 
 
 @app.get("/scenarios")
@@ -997,39 +1000,26 @@ def get_scenarios():
     return SCENARIOS
 
 
-@app.get("/diagnose")
-def diagnose():
-    global last_analysis
-    if not last_analysis:
-        return {"error": "먼저 /analyze를 실행해주세요."}
-    try:
-        prompt = build_diagnosis_prompt(
-            last_analysis["result"],
-            last_analysis["props"],
-            last_analysis["verification"],
-            last_analysis["scenario_info"],
-        )
-        diagnosis = call_ollama(prompt, timeout=480, num_predict=600)
-        with open(REPORT_DIR / "latest_diagnosis.txt", "w", encoding="utf-8") as report:
-            report.write(diagnosis)
-        return {"diagnosis": diagnosis}
-    except Exception as ex:
-        return {"error": str(ex), "detail": traceback.format_exc()}
+def run_diagnosis(analysis, output_dir):
+    prompt = build_diagnosis_prompt(
+        analysis["result"], analysis["props"], analysis["verification"],
+        analysis["scenario_info"],
+    )
+    diagnosis = call_ollama(prompt, timeout=600, num_predict=600)
+    if diagnosis.startswith(("❌", "⚠")):
+        raise RuntimeError(diagnosis)
+    (Path(output_dir) / "diagnosis.txt").write_text(diagnosis, encoding="utf-8")
+    return {"diagnosis": diagnosis}
 
 
-class ChatMessage(BaseModel):
-    message: str
-
-
-@app.post("/chat")
-def chat(chat_msg: ChatMessage):
-    user_msg = chat_msg.message.strip()
+def run_chat(analysis, message, output_dir):
+    user_msg = message.strip()
     print(f"[Chat] {user_msg[:80]}")
     if not user_msg:
         return {"reply": "질문을 입력해주세요."}
 
-    if last_analysis:
-        m, props = last_analysis["result"], last_analysis["props"]
+    if analysis:
+        m, props = analysis["result"], analysis["props"]
         season = (
             "혹한기"
             if props["base_temp"] < 0
@@ -1054,4 +1044,147 @@ def chat(chat_msg: ChatMessage):
     reply = call_ollama(
         full_prompt, timeout=120, num_predict=300, system=CHAT_SYSTEM_PROMPT
     )
+    if reply.startswith(("❌", "⚠")):
+        raise RuntimeError(reply)
+    (Path(output_dir) / "chat.json").write_text(
+        json.dumps({"analysis_id": analysis["analysis_id"], "message": user_msg,
+                    "reply": reply}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return {"reply": reply}
+
+
+# ── Session/job API ─────────────────────────────────────────
+@app.exception_handler(JobError)
+async def handle_job_error(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code, content={"error": str(exc), "detail": str(exc)},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.middleware("http")
+async def private_response_cache(request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def require_session(x_soc_session: str | None = Header(default=None)):
+    return job_manager.validate_session(x_soc_session)
+
+
+@app.post("/session", status_code=201)
+def create_session():
+    return {"session_id": job_manager.create_session(), "expires_in": SESSION_TTL_SECONDS}
+
+
+@app.post("/upload", status_code=201)
+def upload(file: UploadFile = File(...), session_id: str = Depends(require_session)):
+    """Upload in a threadpool so local disk I/O never blocks the ASGI event loop."""
+    name = os.path.basename((file.filename or "upload.bin").replace("\\", "/"))
+    suffix = Path(name).suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".csv"}:
+        raise HTTPException(415, "JPG, PNG, TIFF, BMP 이미지 또는 CSV 파일을 올려주세요.")
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    if file.size is not None and file.size > limit:
+        raise HTTPException(413, f"파일은 {MAX_UPLOAD_MB} MB 이하로 올려주세요.")
+    upload_id, path = job_manager.begin_upload(session_id, suffix)
+    success = False
+    try:
+        total = 0
+        with path.open("xb") as target:
+            while chunk := file.file.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(413, f"파일은 {MAX_UPLOAD_MB} MB 이하로 올려주세요.")
+                target.write(chunk)
+        if total == 0:
+            raise HTTPException(400, "빈 파일은 업로드할 수 없습니다.")
+        if suffix != ".csv":
+            try:
+                with PILImage.open(path) as image:
+                    image.verify()
+            except Exception as exc:
+                raise HTTPException(400, "이미지 파일을 읽을 수 없습니다.") from exc
+        success = True
+        return {"status": "uploaded", "upload_id": upload_id, "name": name,
+                "ext": suffix, "size": total}
+    finally:
+        try:
+            if not success:
+                path.unlink(missing_ok=True)
+        finally:
+            job_manager.finish_upload(session_id, upload_id, success=success)
+
+
+class AnalyzeRequest(BaseModel):
+    upload_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    capture_date: str | None = None
+    scenario: Literal["default", "v1", "v2", "v3"] = "default"
+    mesh_size: int = Field(default=40, ge=20, le=120)
+    e_override: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    nu_override: float | None = Field(default=None, ge=0, lt=0.5, allow_inf_nan=False)
+    alpha_override: float | None = Field(default=None, gt=0, le=1, allow_inf_nan=False)
+    st_override: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+
+    @field_validator("capture_date")
+    @classmethod
+    def valid_date(cls, value):
+        if value:
+            return date.fromisoformat(value).isoformat()
+        return None
+
+
+class DiagnosisRequest(BaseModel):
+    analysis_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+
+
+class ChatRequest(DiagnosisRequest):
+    message: str = Field(min_length=1, max_length=8000)
+
+    @field_validator("message")
+    @classmethod
+    def nonempty_message(cls, value):
+        if not value.strip():
+            raise ValueError("질문을 입력해주세요.")
+        return value.strip()
+
+
+@app.post("/jobs/analyze", status_code=202)
+def enqueue_analysis(request: AnalyzeRequest, session_id: str = Depends(require_session)):
+    image_path = job_manager.upload_path(session_id, request.upload_id)
+    parameters = request.model_dump(exclude={"upload_id"})
+    return job_manager.submit(
+        session_id, "analyze",
+        lambda job_id, directory: run_analysis(image_path, directory, job_id, **parameters),
+    )
+
+
+@app.post("/jobs/diagnose", status_code=202)
+def enqueue_diagnosis(request: DiagnosisRequest, session_id: str = Depends(require_session)):
+    analysis = job_manager.analysis(session_id, request.analysis_id)
+    return job_manager.submit(
+        session_id, "diagnose",
+        lambda job_id, directory: run_diagnosis(analysis, directory),
+    )
+
+
+@app.post("/jobs/chat", status_code=202)
+def enqueue_chat(request: ChatRequest, session_id: str = Depends(require_session)):
+    analysis = job_manager.analysis(session_id, request.analysis_id)
+    return job_manager.submit(
+        session_id, "chat",
+        lambda job_id, directory: run_chat(analysis, request.message, directory),
+    )
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str, session_id: str = Depends(require_session)):
+    return job_manager.get_job(session_id, job_id)
+
+
+@app.get("/analyses/{analysis_id}/images/{filename}")
+def get_analysis_image(analysis_id: str, filename: str,
+                       session_id: str = Depends(require_session)):
+    path = job_manager.analysis_image(session_id, analysis_id, filename)
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})

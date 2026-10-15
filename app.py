@@ -9,12 +9,81 @@ import os
 import asyncio
 import time
 import threading
+from uuid import uuid4
 from config import WEB_UPLOAD_DIR, API_URL
 
 BACKEND_URL = API_URL
-BACKEND_URL_PUBLIC = "/api"
 UPLOAD_DIR = str(WEB_UPLOAD_DIR)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+class BackendClient:
+    """One API session per Flet page; never share user state across pages."""
+
+    def __init__(self):
+        self.session_id = None
+        self._session_lock = threading.Lock()
+
+    @staticmethod
+    def json_response(response):
+        try:
+            payload = response.json()
+        except ValueError:
+            response.raise_for_status()
+            raise RuntimeError("서버 응답을 읽을 수 없습니다.") from None
+        if not response.ok or payload.get("error"):
+            message = payload.get("error") or payload.get("detail")
+            raise RuntimeError(message or f"서버 오류 ({response.status_code})")
+        return payload
+
+    def request(self, method, path, **kwargs):
+        with self._session_lock:
+            if not self.session_id:
+                created = requests.post(f"{BACKEND_URL}/session", timeout=30)
+                self.session_id = self.json_response(created)["session_id"]
+            session_id = self.session_id
+        response = requests.request(
+            method,
+            f"{BACKEND_URL}{path}",
+            headers={"X-SOC-Session": session_id},
+            timeout=kwargs.pop("timeout", 30),
+            **kwargs,
+        )
+        if response.status_code == 401:
+            with self._session_lock:
+                if self.session_id == session_id:
+                    self.session_id = None
+            raise RuntimeError("서버 세션이 만료되었습니다. 파일을 다시 업로드하세요.")
+        return response
+
+    def json(self, method, path, **kwargs):
+        return self.json_response(self.request(method, path, **kwargs))
+
+    def run_job(self, kind, payload, on_status):
+        submitted = self.json("POST", f"/jobs/{kind}", json=payload)
+        job_id = submitted["job_id"]
+        last_status = None
+        while True:
+            job = self.json("GET", f"/jobs/{job_id}")
+            status = job["status"]
+            if status == "completed":
+                return job["result"]
+            if status == "failed":
+                raise RuntimeError(job.get("error") or "작업을 완료하지 못했습니다.")
+            current = (status, job.get("queue_position", 0))
+            if current != last_status:
+                on_status(*current)
+                last_status = current
+            time.sleep(1)
+
+    def image(self, result, filename):
+        path = result.get("images", {}).get(filename)
+        expected = f"/analyses/{result['analysis_id']}/images/"
+        if not path or not path.startswith(expected):
+            raise RuntimeError(f"분석 이미지 경로를 확인할 수 없습니다: {filename}")
+        response = self.request("GET", path)
+        response.raise_for_status()
+        return response.content
 
 # 한국도로공사 톤 컬러
 COLOR_PRIMARY = "#0D1B4C"
@@ -30,6 +99,9 @@ COLOR_TEXT_SUB = "#607D8B"
 
 
 def main(page: ft.Page):
+    backend = BackendClient()
+    upload_id = None
+    analysis_id = None
     page.title = "SOC 도로 포장 열응력 진단 시스템"
     page.scroll = "auto"
     page.theme_mode = ft.ThemeMode.LIGHT
@@ -125,7 +197,7 @@ def main(page: ft.Page):
         "📂 이미지 업로드", bgcolor=COLOR_SECONDARY, color="white", height=42
     )
     analyze_btn = ft.Button(
-        "🚀 분석 시작", bgcolor=COLOR_PRIMARY, color="white", height=46
+        "🚀 분석 시작", bgcolor=COLOR_PRIMARY, color="white", height=46, disabled=True
     )
 
     status_text = ft.Text("Ready", size=12, color=COLOR_TEXT_SUB, italic=True)
@@ -365,8 +437,11 @@ def main(page: ft.Page):
         expand=True,
         border_radius=20,
         dense=True,
+        disabled=True,
     )
-    chat_send_btn = ft.Button("전송", bgcolor=COLOR_PRIMARY, color="white", height=42)
+    chat_send_btn = ft.Button(
+        "전송", bgcolor=COLOR_PRIMARY, color="white", height=42, disabled=True
+    )
     chat_section = ft.Container(
         content=ft.Column(
             [
@@ -481,10 +556,9 @@ def main(page: ft.Page):
         ]
 
         # 이미지 갱신 (도넛/게이지/분석이미지 모두)
-        t = int(time.time())
-        donut_img.src = f"{BACKEND_URL_PUBLIC}/static/donut.png?t={t}"
+        donut_img.src = backend.image(res, "donut.png")
         donut_img.visible = True
-        gauge_img.src = f"{BACKEND_URL_PUBLIC}/static/gauge.png?t={t}"
+        gauge_img.src = backend.image(res, "gauge.png")
         gauge_img.visible = True
 
         # 시나리오 카드
@@ -584,9 +658,9 @@ def main(page: ft.Page):
         )
 
         # 분석 이미지
-        pipeline_img.src = f"{BACKEND_URL_PUBLIC}/static/pipeline_result.png?t={t}"
+        pipeline_img.src = backend.image(res, "pipeline_result.png")
         pipeline_img.visible = True
-        risk_overlay_img.src = f"{BACKEND_URL_PUBLIC}/static/risk_overlay.png?t={t}"
+        risk_overlay_img.src = backend.image(res, "risk_overlay.png")
         risk_overlay_img.visible = True
         images_section.visible = True
 
@@ -594,6 +668,7 @@ def main(page: ft.Page):
     # 핸들러
     # ════════════════════════════════════════════════════════
     def _send_to_backend(local_path, name):
+        nonlocal upload_id
         size = os.path.getsize(local_path) if os.path.exists(local_path) else -1
         print(
             f"[Upload] ⏫ 백엔드 전송 시작: name={name} size={size}B src={local_path}",
@@ -601,24 +676,14 @@ def main(page: ft.Page):
         )
         try:
             with open(local_path, "rb") as f:
-                r = requests.post(
-                    f"{BACKEND_URL}/upload", files={"file": (name, f)}, timeout=120
+                data = backend.json(
+                    "POST", "/upload", files={"file": (name, f)}, timeout=120
                 )
-            if r.status_code == 200:
-                data = r.json()
-                ext = data.get("ext", "")
-                saved = data.get("path", "?")
-                hint = " (CSV 절대온도 ⭐)" if ext == ".csv" else ""
-                status_text.value = f"✅ 업로드 성공!{hint}"
-                print(
-                    f"[Upload] ✅ 완료: name={name} ext={ext} saved={saved}", flush=True
-                )
-            else:
-                status_text.value = f"❌ 업로드 실패 ({r.status_code})"
-                print(
-                    f"[Upload] ❌ 백엔드 HTTP {r.status_code}: {r.text[:200]}",
-                    flush=True,
-                )
+            upload_id = data["upload_id"]
+            ext = data.get("ext", "")
+            hint = " (CSV 절대온도 ⭐)" if ext == ".csv" else ""
+            status_text.value = f"✅ 업로드 성공!{hint}"
+            print(f"[Upload] ✅ 완료: name={name} ext={ext}", flush=True)
         except Exception as ex:
             status_text.value = f"❌ 업로드 오류: {ex}"
             print(f"[Upload] ❌ 예외: {ex}", flush=True)
@@ -637,49 +702,70 @@ def main(page: ft.Page):
     page.services.append(picker)
 
     async def on_upload_click(e):
-        files = await picker.pick_files(
-            allow_multiple=False,
-            file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["png", "jpg", "jpeg", "csv", "tif", "tiff", "bmp"],
-        )
-        if not files:
-            status_text.value = "취소됨"
-            page.update()
-            print("[Upload] 파일 선택 취소됨", flush=True)
+        nonlocal upload_id, analysis_id
+        if upload_btn.disabled:
             return
-        f = files[0]
-        selected_file_label.value = f"📄 {f.name}"
+        upload_btn.disabled = True
+        analyze_btn.disabled = True
+        chat_send_btn.disabled = True
+        chat_input.disabled = True
         page.update()
-        if f.path:
-            print(
-                f"[Upload] 📥 선택: name={f.name} mode=desktop path={f.path}",
-                flush=True,
+        try:
+            files = await picker.pick_files(
+                allow_multiple=False,
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["png", "jpg", "jpeg", "csv", "tif", "tiff", "bmp"],
             )
+            if not files:
+                status_text.value = "취소됨"
+                return
+            f = files[0]
+            upload_id = None
+            analysis_id = None
+            chat_output.controls.clear()
+            selected_file_label.value = f"📄 {f.name}"
             status_text.value = f"📤 업로드 중: {f.name}..."
             page.update()
-            await asyncio.to_thread(_send_to_backend, f.path, f.name)
-        else:
-            print(
-                f"[Upload] 📥 선택: name={f.name} mode=web (브라우저→서버 전송 필요)",
-                flush=True,
-            )
-            status_text.value = f"⬆️ 브라우저 → 서버 전송 중: {f.name}..."
+            if f.path:
+                await asyncio.to_thread(_send_to_backend, f.path, f.name)
+            else:
+                # Each browser transfer has its own filename, even for test.jpg.
+                staging_name = f"{uuid4().hex}{os.path.splitext(f.name)[1].lower()}"
+                status_text.value = f"⬆️ 브라우저 → 서버 전송 중: {f.name}..."
+                page.update()
+                await picker.upload(
+                    [
+                        ft.FilePickerUploadFile(
+                            name=f.name,
+                            upload_url=page.get_upload_url(staging_name, 600),
+                        )
+                    ]
+                )
+                server_path = os.path.join(UPLOAD_DIR, staging_name)
+                status_text.value = f"📤 백엔드 전달 중: {f.name}..."
+                page.update()
+                await asyncio.to_thread(_send_to_backend, server_path, f.name)
+        except Exception as ex:
+            status_text.value = f"❌ 업로드 오류: {ex}"
+        finally:
+            upload_btn.disabled = False
+            analyze_btn.disabled = upload_id is None
+            chat_send_btn.disabled = analysis_id is None
+            chat_input.disabled = analysis_id is None
             page.update()
-            await picker.upload(
-                [
-                    ft.FilePickerUploadFile(
-                        name=f.name,
-                        upload_url=page.get_upload_url(f.name, 600),
-                    )
-                ]
-            )
-            server_path = os.path.join(UPLOAD_DIR, f.name)
-            print(f"[Upload] 💾 브라우저→서버 전송 완료: {server_path}", flush=True)
-            status_text.value = f"📤 백엔드 전달 중: {f.name}..."
+
+    def job_status(label):
+        def update(status, position):
+            if status == "queued":
+                status_text.value = f"⏳ {label} 대기 중 · 대기 순서 {position}"
+            else:
+                status_text.value = f"🔄 {label} 진행 중..."
             page.update()
-            await asyncio.to_thread(_send_to_backend, server_path, f.name)
+
+        return update
 
     def run_analysis_thread():
+        nonlocal analysis_id
         try:
             progress_section.visible = True
             images_section.visible = False
@@ -689,8 +775,9 @@ def main(page: ft.Page):
             page.update()
 
             params = {
+                "upload_id": upload_id,
                 "scenario": scenario_radio.value or "default",
-                "mesh_size": mesh_dropdown.value,
+                "mesh_size": int(mesh_dropdown.value),
             }
             cd = (capture_date_field.value or "").strip()
             if cd:
@@ -701,16 +788,8 @@ def main(page: ft.Page):
                 params["alpha_override"] = alpha_slider.value * 1e-5
                 params["st_override"] = st_slider.value
 
-            r = requests.get(f"{BACKEND_URL}/analyze", params=params, timeout=300)
-            res = r.json()
-
-            if "error" in res:
-                status_text.value = f"❌ 오류: {res['error']}"
-                ai_diag_text.value = f"분석 실패: {res['error']}"
-                if "detail" in res:
-                    print("상세:\n", res["detail"])
-                page.update()
-                return
+            res = backend.run_job("analyze", params, job_status("SAM2 + FEM 분석"))
+            analysis_id = res["analysis_id"]
 
             update_progress(4, "메트릭 계산 완료")
             update_dashboard(res)
@@ -720,8 +799,9 @@ def main(page: ft.Page):
 
             update_progress(5, "🤖 LLM 진단 중...")
             try:
-                rd = requests.get(f"{BACKEND_URL}/diagnose", timeout=600)
-                drez = rd.json()
+                drez = backend.run_job(
+                    "diagnose", {"analysis_id": analysis_id}, job_status("AI 진단")
+                )
                 ai_diag_text.value = drez.get("diagnosis") or drez.get(
                     "error", "진단 결과 없음"
                 )
@@ -734,8 +814,8 @@ def main(page: ft.Page):
             status_text.value = "✅ 분석 완료!"
 
         except requests.exceptions.Timeout:
-            status_text.value = "❌ 타임아웃"
-            ai_diag_text.value = "⚠️ 분석이 너무 오래 걸려 중단되었습니다."
+            status_text.value = "❌ 서버 응답 시간 초과"
+            ai_diag_text.value = "⚠️ 서버 응답을 받지 못했습니다. 제출된 작업은 계속 진행될 수 있습니다."
         except requests.exceptions.ConnectionError:
             status_text.value = "❌ 백엔드 연결 실패"
             ai_diag_text.value = "백엔드(main.py)가 실행 중인지 확인하세요."
@@ -744,22 +824,34 @@ def main(page: ft.Page):
             ai_diag_text.value = f"⚠️ {ex}"
 
         finally:
-            analyze_btn.disabled = False
+            analyze_btn.disabled = upload_id is None
             upload_btn.disabled = False
+            chat_send_btn.disabled = analysis_id is None
+            chat_input.disabled = analysis_id is None
             page.update()
 
     def analyze_click(e):
-        if analyze_btn.disabled:
+        nonlocal analysis_id
+        if analyze_btn.disabled or not upload_id:
             return
+        analysis_id = None
         analyze_btn.disabled = True
         upload_btn.disabled = True
+        chat_send_btn.disabled = True
+        chat_input.disabled = True
+        chat_output.controls.clear()
         page.update()
         threading.Thread(target=run_analysis_thread, daemon=True).start()
 
     async def send_chat(e):
-        msg = chat_input.value.strip()
-        if not msg:
+        msg = (chat_input.value or "").strip()
+        if not msg or not analysis_id or chat_send_btn.disabled:
             return
+        target_analysis = analysis_id
+        chat_send_btn.disabled = True
+        chat_input.disabled = True
+        analyze_btn.disabled = True
+        upload_btn.disabled = True
         chat_output.controls.append(
             ft.Container(
                 content=ft.Text(f"🧑 {msg}", size=12, weight="bold", selectable=True),
@@ -771,14 +863,23 @@ def main(page: ft.Page):
         chat_input.value = ""
         page.update()
         try:
-            r = await asyncio.to_thread(
-                requests.post, f"{BACKEND_URL}/chat", json={"message": msg}, timeout=180
+            response = await asyncio.to_thread(
+                backend.run_job,
+                "chat",
+                {"analysis_id": target_analysis, "message": msg},
+                job_status("추가 질문 답변"),
             )
-            reply = r.json().get("reply", "응답 없음")
+            reply = response.get("reply", "응답 없음")
         except requests.exceptions.Timeout:
             reply = "⚠️ 응답 시간 초과"
         except Exception as ex:
             reply = f"⚠️ 오류: {ex}"
+        finally:
+            chat_send_btn.disabled = analysis_id is None
+            chat_input.disabled = analysis_id is None
+            analyze_btn.disabled = upload_id is None
+            upload_btn.disabled = False
+            status_text.value = "답변 확인을 마쳤습니다."
         chat_output.controls.append(
             ft.Container(
                 content=ft.Text(f"🤖 {reply}", size=12, selectable=True),

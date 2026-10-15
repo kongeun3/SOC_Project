@@ -28,7 +28,7 @@ Zaemit 미리보기에서는 분석 API를 호출하지 않도록 처리했습�
 
 - **index.html**: 편집할 화면의 실제 요소와 문구가 있습니다. Python이나 템플릿 문법이 포함되어 있지 않습니다.
 - **style.css**: 색상·간격·모서리·글꼴과 반응형 배치가 있습니다. 맨 위의 `:root`에서 공통 디자인 값을 바꿀 수 있습니다.
-- **app.js**: `/api/upload`, `/api/analyze`, `/api/diagnose`, `/api/chat`과 연결합니다. 외부 JavaScript 라이브러리나 CDN이 필요하지 않습니다.
+- **app.js**: `/api/session`에서 탭별 세션을 만들고 `/api/upload` 및 `/api/jobs/*`에 연결합니다. 작업 상태를 조회해 대기 순서와 결과를 표시합니다. 외부 JavaScript 라이브러리나 CDN이 필요하지 않습니다.
 
 ## 수정할 때 유지할 연결
 
@@ -52,6 +52,8 @@ Zaemit 미리보기에서는 분석 API를 호출하지 않도록 처리했습�
 
 결과 이미지의 `data-result-image` 값은 서버가 저장하는 파일 이름입니다.
 `gauge.png`, `donut.png`, `pipeline_result.png`, `fem_results.png`를 사용합니다.
+이미지는 분석 응답의 `images` 경로에서 세션 인증 후 불러옵니다. 공용 `/api/static/` 경로를 직접 지정하지 마세요.
+새로고침하면 새 세션이 시작되므로 파일을 다시 업로드해야 합니다.
 초기 화면의 `—` 표시는 분석 전 빈 값이며, 분석이 끝나면 실제 값으로 바뀝니다.
 
 ## 동작 확인

@@ -36,6 +36,7 @@ if not FLET_SECRET_KEY:
     raise ValueError("Set FLET_SECRET_KEY in the project .env file")
 
 RESULT_DIR = ROOT / "result"
+JOBS_DIR = RESULT_DIR / "jobs"
 STATIC_DIR = RESULT_DIR / "images"
 UPLOAD_DIR = RESULT_DIR / "uploads"
 WEB_UPLOAD_DIR = RESULT_DIR / "web_uploads"
@@ -50,5 +51,22 @@ OLLAMA_AUTO_START = os.environ.get("OLLAMA_AUTO_START", "true").lower() in (
     "yes",
 )
 
-for directory in (STATIC_DIR, UPLOAD_DIR, WEB_UPLOAD_DIR, REPORT_DIR, LOG_DIR):
+
+def _positive_int(name, default):
+    value = int(os.environ.get(name, default))
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+# One resource worker owns SAM2, Matplotlib and Ollama. HTTP requests stay concurrent.
+JOB_QUEUE_CAPACITY = _positive_int("JOB_QUEUE_CAPACITY", 32)
+SESSION_TTL_SECONDS = _positive_int("SESSION_TTL_SECONDS", 86400)
+MAX_SESSIONS = _positive_int("MAX_SESSIONS", 256)
+MAX_JOBS_PER_SESSION = _positive_int("MAX_JOBS_PER_SESSION", 128)
+MAX_UPLOADS_PER_SESSION = _positive_int("MAX_UPLOADS_PER_SESSION", 64)
+MAX_PENDING_PER_SESSION = _positive_int("MAX_PENDING_PER_SESSION", 4)
+MAX_UPLOAD_MB = _positive_int("MAX_UPLOAD_MB", 32)
+
+for directory in (STATIC_DIR, UPLOAD_DIR, WEB_UPLOAD_DIR, REPORT_DIR, LOG_DIR, JOBS_DIR):
     directory.mkdir(parents=True, exist_ok=True)
