@@ -1,6 +1,101 @@
-﻿# SOC · 도로 포장 열응력 진단
+﻿# 길바닥연구소 - 도로 포장 열응력 계산 프로그램
 
 단일 Python 프로젝트에서 웹 화면, SAM2 균열 검출, FEM 열응력 계산, 로컬 AI 진단을 실행합니다.
+
+## 설치 방법 (Windows · Anaconda)
+
+### 1. 프로젝트 다운로드
+
+Anaconda 또는 Miniconda와 Git을 설치하고 **Anaconda Prompt**에서 실행합니다.
+GitHub에서 ZIP으로 다운로드했다면 압축을 풀고 해당 폴더로 이동해도 됩니다.
+
+```bat
+git clone https://github.com/kongeun3/SOC_Project.git
+cd SOC_Project
+```
+
+이후 명령은 `environment.yml`과 `main2.py`가 있는 프로젝트 루트에서 실행합니다.
+
+### 2. SOC 가상환경 생성
+
+```bat
+conda env create -f environment.yml
+conda activate SOC
+```
+
+`environment.yml`은 Python 3.10, PyTorch 2.5.1, torchvision 0.20.1,
+CUDA 12.4용 패키지와 `requirements.txt`의 실행 패키지를 함께 설치합니다.
+이 환경 설정은 NVIDIA GPU 사용을 기준으로 합니다. GPU를 사용하려면 호환되는
+NVIDIA 드라이버가 필요하며, CUDA Toolkit을 별도로 설치할 필요는 없습니다.
+
+설치 후 GPU 인식 여부를 확인합니다.
+
+```bat
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.cuda.is_available())"
+```
+
+`CUDA: False`이면 현재 코드는 CPU로 분석합니다. GPU보다 오래 걸릴 수 있습니다.
+이미 `SOC` 환경이 설치된 PC에서는 환경 생성 대신 `conda activate SOC`만 실행하세요.
+
+### 3. weights 다운로드
+
+학습 가중치는 GitHub 저장소와 별도로 아래 링크에서 다운로드하세요.
+
+**[Google Drive에서 weights 다운로드](https://drive.google.com/drive/folders/1slGvVoo3ThN5g39BHVoNQ1Hp5ctnylAZ?usp=sharing)**
+
+압축 파일로 다운로드했다면 압축을 풀고, 다음 세 파일이 프로젝트 루트의
+`weights/` 바로 아래에 오도록 배치합니다. `weights/weights/`처럼 중첩되지 않도록 확인하세요.
+
+```text
+SOC_Project/
+├─ main2.py
+└─ weights/
+   ├─ checkpoint_8.pt
+   ├─ prompt_tuned_ep20.pt
+   └─ sam2.1_hiera_b+.yaml
+```
+
+위 파일 이름은 분석 코드에서 사용하므로 변경하지 마세요.
+
+### 4. .env 설정
+
+처음 설치하는 PC에서는 예제 설정을 복사합니다. 기존 `.env`가 있다면 유지하세요.
+
+```bat
+copy .env.example .env
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+출력된 무작위 문자열을 `.env`의 `FLET_SECRET_KEY` 값에 넣습니다.
+기본 접속 주소는 `SERVER_URL=http://127.0.0.1:8000`이며, 상세 설정은 아래를 참고하세요.
+`.env`에는 PC별 설정을 저장하며 GitHub에 업로드하지 않습니다.
+
+### 5. AI 진단용 Ollama 준비
+
+AI 진단 보고서와 추가 질문을 사용하려면 Ollama를 설치하고 다음 모델을 다운로드합니다.
+
+```bat
+ollama pull exaone3.5:7.8b
+```
+
+Ollama 설치 후 명령을 찾지 못하면 Anaconda Prompt를 새로 여세요.
+기본 설정에서는 프로젝트 실행 시 로컬 Ollama 서버를 자동으로 시작합니다.
+Ollama를 별도로 실행하려면 다른 프롬프트에서 `ollama serve`를 실행하세요.
+AI 서비스를 준비하지 않아도 균열 검출과 FEM 분석은 사용할 수 있으며,
+이 경우 화면의 **분석 후 AI 진단 자동 생성**을 해제하세요.
+
+### 6. 웹 화면 실행
+
+```bat
+conda activate SOC
+python main2.py
+```
+
+서버 준비가 끝나면 브라우저에서 **http://127.0.0.1:8000**으로 접속합니다.
+파일을 선택하고 물성 입력을 확인한 뒤 **분석 시작**을 누릅니다.
+분석 결과와 로그는 `result/` 아래에 저장되며, 서버는 **Ctrl+C**로 종료합니다.
+기존 Flet 화면을 사용하려면 `python main2.py` 대신 `python main.py`를 실행하세요.
+두 서버를 같은 주소와 포트로 동시에 실행할 수는 없습니다.
 
 ## 실행
 
