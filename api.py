@@ -291,17 +291,14 @@ def get_capture_date(image_path: str, override: str | None = None) -> tuple[str,
 
 
 # ── [8] 시각화 ──────────────────────────────────────────────
-def save_pipeline_image(image_np, pred_mask, expanded_mask, thermal_matrix):
+def save_pipeline_image(
+    image_np, expanded_mask, thermal_matrix, risk_map, nodes, elements
+):
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
     axes[0].imshow(image_np)
-    axes[0].set_title("1. 원본 이미지", fontweight="bold")
     axes[0].axis("off")
-    axes[1].imshow(pred_mask, cmap="gray")
-    axes[1].set_title("2. SAM2 균열 검출", fontweight="bold")
+    axes[1].imshow(expanded_mask, cmap="gray")
     axes[1].axis("off")
-    axes[2].imshow(expanded_mask, cmap="gray")
-    axes[2].set_title("3. 분석 영역", fontweight="bold")
-    axes[2].axis("off")
     gray_bg = np.full(
         (thermal_matrix.shape[0], thermal_matrix.shape[1], 3), 30, dtype=np.uint8
     )
@@ -310,13 +307,13 @@ def save_pipeline_image(image_np, pred_mask, expanded_mask, thermal_matrix):
         norm = plt.Normalize(
             vmin=np.nanmin(thermal_matrix), vmax=np.nanmax(thermal_matrix)
         )
-        colored = (plt.get_cmap("jet")(norm(thermal_matrix))[:, :, :3] * 255).astype(
-            np.uint8
-        )
-        gray_bg[valid_mask] = colored[valid_mask]
-    axes[3].imshow(gray_bg)
-    axes[3].set_title("4. 열행렬", fontweight="bold")
-    axes[3].axis("off")
+        colored = (
+            plt.get_cmap("jet")(norm(thermal_matrix[valid_mask]))[:, :3] * 255
+        ).astype(np.uint8)
+        gray_bg[valid_mask] = colored
+    axes[2].imshow(gray_bg)
+    axes[2].axis("off")
+    draw_risk_overlay(axes[3], image_np, risk_map, nodes, elements)
     plt.tight_layout()
     plt.savefig(
         os.path.join(STATIC_DIR, "pipeline_result.png"),
@@ -327,40 +324,37 @@ def save_pipeline_image(image_np, pred_mask, expanded_mask, thermal_matrix):
     plt.close(fig)
 
 
-def save_risk_overlay(image_np, risk_map, nodes, elements, n_rows, n_cols):
-    """원본 이미지 위에 위험 위치를 시각적으로 오버레이."""
+def draw_risk_overlay(ax, image_np, risk_map, nodes, elements):
+    """주어진 축에 원본 이미지와 FEM 위험 위치를 겹쳐 그린다."""
     h, w = image_np.shape[:2]
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
     ax.imshow(image_np)
 
     # 메시 좌표 → 이미지 픽셀 좌표 변환
-    mesh_w = (n_cols - 1) * 0.01
-    mesh_h = (n_rows - 1) * 0.01
+    mesh_min = nodes.min(axis=0)
+    mesh_span = np.maximum(nodes.max(axis=0) - mesh_min, 1e-12)
+    centers = nodes[elements].mean(axis=1)
+    pixel_x = (centers[:, 0] - mesh_min[0]) / mesh_span[0] * (w - 1)
+    pixel_y = (1.0 - (centers[:, 1] - mesh_min[1]) / mesh_span[1]) * (h - 1)
 
     # 응력비 0.5 이상만 표시 (시각적 노이즈 줄이기)
-    for i, elem in enumerate(elements):
-        if risk_map[i] < 0.5:
-            continue
-        center = nodes[elem].mean(axis=0)
-        # 메시 좌표(0~mesh_w, 0~mesh_h)를 이미지 좌표(0~w, 0~h)로
-        px = center[0] / mesh_w * w
-        py = (1.0 - center[1] / mesh_h) * h  # Y축 뒤집기
-        sr = risk_map[i]
-        if sr >= 1.0:
-            color, alpha, size = "red", 0.85, 80
-        elif sr >= 0.7:
-            color, alpha, size = "orange", 0.6, 50
-        else:
-            color, alpha, size = "yellow", 0.35, 30
+    for selected, color, alpha, size in (
+        ((risk_map >= 0.5) & (risk_map < 0.7), "yellow", 0.35, 30),
+        ((risk_map >= 0.7) & (risk_map < 1.0), "orange", 0.6, 50),
+        (risk_map >= 1.0, "red", 0.85, 80),
+    ):
         ax.scatter(
-            px, py, c=color, s=size, alpha=alpha, edgecolors="white", linewidth=0.5
+            pixel_x[selected],
+            pixel_y[selected],
+            c=color,
+            s=size,
+            alpha=alpha,
+            edgecolors="white",
+            linewidth=0.5,
         )
 
     # 최대 응력 위치 강조
     worst_idx = int(np.argmax(risk_map))
-    worst = nodes[elements[worst_idx]].mean(axis=0)
-    wx = worst[0] / mesh_w * w
-    wy = (1.0 - worst[1] / mesh_h) * h
+    wx, wy = pixel_x[worst_idx], pixel_y[worst_idx]
     ax.scatter(
         wx,
         wy,
@@ -371,24 +365,25 @@ def save_risk_overlay(image_np, risk_map, nodes, elements, n_rows, n_cols):
         linewidth=2.5,
         zorder=10,
     )
-    ax.annotate(
-        f"최대 응력비\n{risk_map.max():.3f}",
-        xy=(wx, wy),
-        xytext=(wx + 30, wy - 30),
-        fontsize=11,
+    ax.text(
+        0.02,
+        0.02,
+        f"최대 응력비 {risk_map.max():.3f}",
+        transform=ax.transAxes,
+        fontsize=9,
         fontweight="bold",
         color="white",
         bbox=dict(boxstyle="round,pad=0.3", fc="red", alpha=0.9),
-        arrowprops=dict(arrowstyle="->", color="white", lw=2),
     )
-
-    ax.set_title(
-        f"위험 위치 오버레이 — 응력비 ≥ 0.5 영역만 표시 "
-        f"(빨강: 파괴위험 / 주황: 경고 / 노랑: 주의)",
-        fontsize=13,
-        fontweight="bold",
-    )
+    ax.set_xlim(-0.5, w - 0.5)
+    ax.set_ylim(h - 0.5, -0.5)
     ax.axis("off")
+
+
+def save_risk_overlay(image_np, risk_map, nodes, elements, n_rows, n_cols):
+    """원본 이미지 위에 위험 위치를 시각적으로 오버레이."""
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    draw_risk_overlay(ax, image_np, risk_map, nodes, elements)
     plt.tight_layout()
     plt.savefig(
         os.path.join(STATIC_DIR, "risk_overlay.png"),
@@ -444,28 +439,19 @@ def save_donut_chart(critical, warning, safe, total):
     """Critical/Warning/Safe 도넛 차트."""
     fig, ax = plt.subplots(1, 1, figsize=(5, 5), subplot_kw=dict(aspect="equal"))
     sizes = [critical, warning, safe]
-    labels_full = [
-        f"Critical\n{critical}개\n({critical/total*100:.1f}%)",
-        f"Warning\n{warning}개\n({warning/total*100:.1f}%)",
-        f"Safe\n{safe}개\n({safe/total*100:.1f}%)",
-    ]
     colors = ["#D32F2F", "#F57C00", "#388E3C"]
     # 0인 항목은 제거 (시각적 노이즈)
-    filtered = [(s, l, c) for s, l, c in zip(sizes, labels_full, colors) if s > 0]
+    filtered = [(s, c) for s, c in zip(sizes, colors) if s > 0]
     if not filtered:
         plt.close(fig)
         return
-    sizes, labels_full, colors = zip(*filtered)
+    sizes, colors = zip(*filtered)
 
-    wedges, texts, autotexts = ax.pie(
+    ax.pie(
         sizes,
-        labels=labels_full,
         colors=colors,
-        autopct="",
         startangle=90,
-        pctdistance=0.85,
         wedgeprops=dict(width=0.4, edgecolor="white", linewidth=2),
-        textprops=dict(fontsize=11, fontweight="bold"),
     )
     # 중앙 텍스트
     ax.text(
@@ -479,9 +465,6 @@ def save_donut_chart(critical, warning, safe, total):
         color="#0D1B4C",
     )
     ax.text(0, -0.18, "총 요소", ha="center", va="center", fontsize=11, color="#607D8B")
-    ax.set_title(
-        "요소 분포 (Critical / Warning / Safe)", fontsize=13, fontweight="bold", pad=18
-    )
     plt.tight_layout()
     plt.savefig(
         os.path.join(STATIC_DIR, "donut.png"),
@@ -533,13 +516,10 @@ def save_gauge_chart(max_ratio, S_t):
     # 중앙 텍스트
     if max_ratio < 0.7:
         color = "#388E3C"
-        grade = "Safe"
     elif max_ratio < 1.0:
         color = "#F57C00"
-        grade = "Warning"
     else:
         color = "#D32F2F"
-        grade = "Critical"
     ax.text(
         0,
         -0.45,
@@ -550,21 +530,10 @@ def save_gauge_chart(max_ratio, S_t):
         fontweight="bold",
         color=color,
     )
-    ax.text(
-        0,
-        -0.65,
-        f"{grade}  |  S_t = {S_t} MPa",
-        ha="center",
-        va="center",
-        fontsize=12,
-        color="#607D8B",
-    )
-
     ax.set_xlim(-1.4, 1.4)
     ax.set_ylim(-0.8, 1.4)
     ax.set_aspect("equal")
     ax.axis("off")
-    ax.set_title("위험도 게이지 (응력비)", fontsize=13, fontweight="bold")
     plt.tight_layout()
     plt.savefig(
         os.path.join(STATIC_DIR, "gauge.png"),
@@ -893,7 +862,6 @@ def analyze(
             thermal_matrix[expanded_mask > 0] = thermal_img[expanded_mask > 0].astype(
                 np.float32
             )
-            save_pipeline_image(image_np, pred_mask, expanded_mask, thermal_matrix)
 
             # 픽셀 → 온도 매핑 (PNG 폴백: 월별 base_temp 기준 ±10°C)
             filled = np.nan_to_num(
@@ -913,10 +881,9 @@ def analyze(
                 + (T_raw - T_raw.min()) / (T_raw.max() - T_raw.min() + 1e-9) * 20.0
             )
 
-        # CSV 모드일 때도 파이프라인 이미지 생성 (간단 버전)
+        # CSV 모드의 파이프라인에는 절대온도 행렬 사용
         if input_mode == "csv_absolute":
             thermal_matrix = T_full.astype(np.float32)
-            save_pipeline_image(image_np, pred_mask, expanded_mask, thermal_matrix)
 
         # ── FEM 해석 ──
         print(
@@ -965,6 +932,9 @@ def analyze(
         )
 
         try:
+            save_pipeline_image(
+                image_np, expanded_mask, thermal_matrix, risk_map, nodes, elements
+            )
             visualize_results(
                 nodes,
                 elements,

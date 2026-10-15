@@ -69,11 +69,11 @@
     state.result = null;
     $("gradeBanner").dataset.grade = "idle";
     text("gradeBadge", "분석 대기");
-    text("gradeTitle", "현장 데이터에서 진단이 시작됩니다.");
-    text("gradeDescription", "왼쪽에서 파일과 조건을 선택하면 위험도와 분석 결과를 확인할 수 있습니다.");
+    text("gradeTitle", "곧 진단이 완료됩니다.");
+    text("gradeDescription", "왼쪽 배너에서 파일과 분석 조건을 확인할 수 있습니다.");
     for (const id of ["maxStress", "maxRatio", "crackRatio", "criticalCount", "resultScenario", "resultDate", "resultMesh", "resultInput", "resultProps", "temperatureUncertainty", "stressRange", "ratioRange", "verificationV1", "verificationV2"]) text(id, "—");
-    text("meanStress", "단위 MPa"); text("crackPixels", "이미지 면적 기준"); text("totalElements", "전체 해석 요소 기준");
-    text("distributionText", "파일을 분석하면 분포가 표시됩니다.");
+    text("crackPixels", "총 —pixel"); text("totalElements", "전체 해석 요소 기준");
+    text("distributionText", "");
     text("diagnosisContent", "분석이 끝나면 결과를 바탕으로 종합 진단을 생성할 수 있습니다.");
     $("diagnosisContent").classList.add("muted");
     $("chatMessages").replaceChildren();
@@ -150,19 +150,18 @@
     const { fem, sam2, uncertainty } = data.result;
     state.result = data;
     const grades = {
-      Safe: ["safe", "안전", "현재 해석에서는 안전 등급으로 분류되었습니다."],
-      Warning: ["warning", "경고", "경고 등급의 해석 요소가 있습니다."],
-      Critical: ["critical", "위험", "위험 등급의 해석 요소가 확인되었습니다."],
+      Safe: ["safe", "안전", "이 균열의 위험 수준은 안전입니다."],
+      Warning: ["warning", "경고", "이 균열의 위험 수준은 경고입니다."],
+      Critical: ["critical", "위험", "이 균열의 위험 수준은 위험입니다."],
     };
     const grade = grades[data.result.grade] || ["idle", data.result.grade, "분석 결과를 확인하세요."];
     $("gradeBanner").dataset.grade = grade[0];
     text("gradeBadge", `종합 등급 · ${grade[1]}`); text("gradeTitle", grade[2]);
-    text("gradeDescription", `${data.scenario_info.name} · ${data.mesh_resolution} 격자 · 최대 응력비 ${format(fem.max_ratio * 100)}%`);
+    text("gradeDescription", `최대 주응력: ${format(fem.max_stress_MPa, 4)} MPa · 최대 응력비: ${format(fem.max_ratio, 4)}`);
     text("maxStress", format(fem.max_stress_MPa, 4));
-    text("meanStress", `MPa · 평균 ${format(fem.mean_stress_MPa, 4)}`);
     text("maxRatio", format(fem.max_ratio, 4));
     text("crackRatio", `${format(sam2.crack_ratio * 100)}%`);
-    text("crackPixels", `${format(sam2.crack_pixels, 0)}개 균열 픽셀`);
+    text("crackPixels", `총 ${format(sam2.crack_pixels, 0)}pixel`);
     text("criticalCount", format(fem.critical, 0));
     text("totalElements", `전체 ${format(fem.total, 0)}개 중`);
     text("distributionText", `안전 ${format(fem.safe, 0)} · 경고 ${format(fem.warning, 0)} · 위험 ${format(fem.critical, 0)}`);
@@ -245,11 +244,6 @@
       showError(error.message); text("operationStatus", "분석하지 못했습니다. 조건을 확인하고 다시 시도하세요.");
     } finally { setBusy(false); }
   });
-  const guideDialog = $("guideDialog");
-  $("guideButton").addEventListener("click", () => guideDialog.showModal());
-  $("guideCloseButton").addEventListener("click", () => guideDialog.close());
-  guideDialog.addEventListener("click", (event) => { if (event.target === guideDialog) guideDialog.close(); });
-
   $("diagnoseButton").addEventListener("click", () => {
     if (!state.busy && state.result) { showError(); void diagnose(); }
   });

@@ -51,7 +51,7 @@ Zaemit 미리보기에서는 분석 API를 호출하지 않도록 처리했습�
 결과 이미지와 그 안내 문구는 같은 부모 요소 안에 두세요.
 
 결과 이미지의 `data-result-image` 값은 서버가 저장하는 파일 이름입니다.
-`gauge.png`, `donut.png`, `pipeline_result.png`, `risk_overlay.png`, `fem_results.png`를 사용합니다.
+`gauge.png`, `donut.png`, `pipeline_result.png`, `fem_results.png`를 사용합니다.
 초기 화면의 `—` 표시는 분석 전 빈 값이며, 분석이 끝나면 실제 값으로 바뀝니다.
 
 ## 동작 확인

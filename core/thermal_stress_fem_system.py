@@ -423,22 +423,20 @@ def visualize_results(
 ):
     os.makedirs(out, exist_ok=True)
     pw, ph = compute_pixel_size_m(d)
-    fig, axes = plt.subplots(2, 2, figsize=(14, 11))
+    fig, axes = plt.subplots(1, 4, figsize=(24, 5.5))
     ec = np.zeros((len(elements), 2))
     for i, (ni, nj, nm) in enumerate(elements):
         ec[i] = nodes[[ni, nj, nm]].mean(0)
 
-    axes[0, 0].imshow(T_field.reshape(nr, nc), cmap="inferno", aspect="equal")
-    axes[0, 0].set_title(f"(a) 입력 온도 [°C]  {FLIR_ONE_PRO['name']}")
+    axes[0].imshow(T_field.reshape(nr, nc), cmap="inferno", aspect="equal")
 
-    sc = axes[0, 1].scatter(
+    sc = axes[1].scatter(
         ec[:, 0] * 1e3, ec[:, 1] * 1e3, c=ep, cmap="RdYlBu_r", s=3, marker="s"
     )
-    plt.colorbar(sc, ax=axes[0, 1], shrink=0.8)
-    axes[0, 1].set_title("(b) 최대 주응력 [MPa]")
-    axes[0, 1].set_aspect("equal")
+    plt.colorbar(sc, ax=axes[1], shrink=0.8)
+    axes[1].set_aspect("equal")
 
-    sc2 = axes[1, 0].scatter(
+    sc2 = axes[2].scatter(
         ec[:, 0] * 1e3,
         ec[:, 1] * 1e3,
         c=rm,
@@ -448,24 +446,17 @@ def visualize_results(
         vmin=0,
         vmax=max(1.5, rm.max()),
     )
-    plt.colorbar(sc2, ax=axes[1, 0], shrink=0.8)
-    axes[1, 0].set_title(f"(c) SR=sigma_max/S_t  (S_t={props['S_t']}MPa)")
-    axes[1, 0].set_aspect("equal")
+    plt.colorbar(sc2, ax=axes[2], shrink=0.8)
+    axes[2].set_aspect("equal")
 
     col = np.zeros((len(rm), 3))
     col[rm < 0.7] = [0.2, 0.7, 0.2]
     col[(rm >= 0.7) & (rm < 1.0)] = [1.0, 0.8, 0.0]
     col[rm >= 1.0] = [0.9, 0.1, 0.1]
-    axes[1, 1].scatter(ec[:, 0] * 1e3, ec[:, 1] * 1e3, c=col, s=3, marker="s")
-    axes[1, 1].set_title("(d) 위험등급 (녹:안전/황:경고/적:파괴)")
-    axes[1, 1].set_aspect("equal")
+    axes[3].scatter(ec[:, 0] * 1e3, ec[:, 1] * 1e3, c=col, s=3, marker="s")
+    axes[3].set_aspect("equal")
 
-    fig.suptitle(
-        f"열응력 FEM v3.0  |  {FLIR_ONE_PRO['name']}  |  "
-        f"E={props['E']}MPa  nu={props['nu']}",
-        fontweight="bold",
-    )
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout()
     p = os.path.join(out, "fem_results.png")
     plt.savefig(p, dpi=150, bbox_inches="tight")
     plt.close()
