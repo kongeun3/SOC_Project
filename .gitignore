@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+past/
+result/*
+!result/.gitkeep
+weights/*
+sam2/*.yaml
+sam2/configs/
+.env
+# Zaemit AI tool config (auto-generated)
+.mcp.json

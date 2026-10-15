@@ -1,0 +1,327 @@
+/* API wiring only. Layout belongs in index.html; appearance belongs in style.css. */
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const state = { file: null, uploaded: false, result: null, busy: false, previewUrl: null, health: null, scenarios: {} };
+  // Zaemit's preview uses its own /api routes, not the analysis server's routes.
+  const previewOnly = location.protocol === "file:" || Boolean(document.getElementById("zaemit-editor-base"));
+  const conditionsPanel = document.querySelectorAll(".input-panel")[1];
+  const captureDate = $("captureDate");
+  const captureDateHint = $("captureDateHint");
+  if (conditionsPanel && captureDate && captureDateHint) {
+    const scenario = $("scenario");
+    const dateLabel = document.querySelector('label[for="captureDate"]');
+    if (dateLabel && scenario) {
+      conditionsPanel.insertBefore(dateLabel, scenario);
+      conditionsPanel.insertBefore(captureDate, scenario);
+      conditionsPanel.insertBefore(captureDateHint, scenario);
+    }
+  }
+  const allowedExtensions = new Set(["png", "jpg", "jpeg", "csv", "tif", "tiff", "bmp"]);
+  const format = (value, decimals = 2) => typeof value === "number" && Number.isFinite(value)
+    ? new Intl.NumberFormat("ko-KR", { maximumFractionDigits: decimals }).format(value) : "—";
+  const text = (id, value) => { $(id).textContent = value ?? "—"; };
+  const extension = (file) => file.name.split(".").pop().toLowerCase();
+
+  async function request(path, { timeout = 30000, ...options } = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const response = await fetch(`/api${path}`, { ...options, signal: controller.signal, cache: "no-store" });
+      let data;
+      try { data = await response.json(); }
+      catch { throw new Error(`서버가 분석 데이터를 반환하지 않았습니다. (HTTP ${response.status})`); }
+      if (!response.ok) throw new Error(data.error || (typeof data.detail === "string" ? data.detail : `요청 실패: HTTP ${response.status}`));
+      if (data.error) throw new Error(data.error);
+      return data;
+    } catch (error) {
+      if (error.name === "AbortError") throw new Error("응답 대기 시간이 초과되었습니다. 서버 로그를 확인하고 다시 시도하세요.");
+      if (error instanceof TypeError) throw new Error("서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.");
+      throw error;
+    } finally { clearTimeout(timer); }
+  }
+
+  function showError(message = "") {
+    text("errorMessage", message);
+    $("errorMessage").hidden = !message;
+  }
+
+  function refreshControls() {
+    $("inputSettings").disabled = state.busy || previewOnly;
+    $("customFields").disabled = !$("customProps").checked;
+    $("clearFileButton").disabled = state.busy;
+    $("analyzeButton").disabled = state.busy || !state.uploaded || previewOnly || !state.health;
+    $("downloadButton").disabled = !state.result;
+    $("diagnoseButton").disabled = state.busy || !state.result || previewOnly;
+    $("chatInput").disabled = state.busy || !state.result || previewOnly;
+    $("chatButton").disabled = state.busy || !state.result || previewOnly;
+  }
+
+  function setBusy(busy, message) {
+    state.busy = busy;
+    $("operationProgress").hidden = !busy;
+    $("resultsHeading").setAttribute("aria-busy", String(busy));
+    if (message) text("operationStatus", message);
+    refreshControls();
+  }
+
+  function resetResults() {
+    state.result = null;
+    $("gradeBanner").dataset.grade = "idle";
+    text("gradeBadge", "분석 대기");
+    text("gradeTitle", "현장 데이터에서 진단이 시작됩니다.");
+    text("gradeDescription", "왼쪽에서 파일과 조건을 선택하면 위험도와 분석 결과를 확인할 수 있습니다.");
+    for (const id of ["maxStress", "maxRatio", "crackRatio", "criticalCount", "resultScenario", "resultDate", "resultMesh", "resultInput", "resultProps", "temperatureUncertainty", "stressRange", "ratioRange", "verificationV1", "verificationV2"]) text(id, "—");
+    text("meanStress", "단위 MPa"); text("crackPixels", "이미지 면적 기준"); text("totalElements", "전체 해석 요소 기준");
+    text("distributionText", "파일을 분석하면 분포가 표시됩니다.");
+    text("diagnosisContent", "분석이 끝나면 결과를 바탕으로 종합 진단을 생성할 수 있습니다.");
+    $("diagnosisContent").classList.add("muted");
+    $("chatMessages").replaceChildren();
+    const empty = document.createElement("p");
+    empty.className = "muted chat-empty"; empty.textContent = "분석을 완료하면 후속 질문을 할 수 있습니다.";
+    $("chatMessages").append(empty);
+    document.querySelectorAll("[data-result-image]").forEach((image) => {
+      image.onload = null; image.onerror = null; image.hidden = true; image.removeAttribute("src");
+      const placeholder = image.parentElement.querySelector(".chart-placeholder, .image-empty");
+      if (placeholder) placeholder.hidden = false;
+    });
+    refreshControls();
+  }
+
+  function clearSelection() {
+    if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+    state.file = null; state.uploaded = false; state.previewUrl = null;
+    $("fileInput").value = ""; $("selectedFile").hidden = true;
+    $("filePreview").hidden = true; $("filePreview").removeAttribute("src");
+    resetResults(); showError();
+    $("workspace").classList.remove("has-file");
+    text("operationStatus", "분석할 파일을 먼저 선택하세요.");
+  }
+
+  async function selectFile(file) {
+    if (!file || state.busy || previewOnly) return;
+    if (!allowedExtensions.has(extension(file))) {
+      $("fileInput").value = "";
+      showError("PNG, JPG, TIFF, BMP 이미지 또는 CSV 파일을 선택하세요.");
+      return;
+    }
+    if (!file.size) { showError("내용이 없는 파일입니다. 다른 파일을 선택하세요."); return; }
+    clearSelection();
+    state.file = file;
+    text("fileName", file.name);
+    text("fileMeta", `${format(file.size / 1024 / 1024, 2)} MB · ${extension(file).toUpperCase()}`);
+    $("selectedFile").hidden = false;
+    if (["png", "jpg", "jpeg", "bmp"].includes(extension(file))) {
+      state.previewUrl = URL.createObjectURL(file);
+      $("filePreview").src = state.previewUrl; $("filePreview").hidden = false;
+      $("filePreview").onerror = () => { $("filePreview").hidden = true; };
+    }
+    setBusy(true, "파일을 업로드하고 있습니다…");
+    try {
+      const form = new FormData(); form.append("file", file, file.name);
+      await request("/upload", { method: "POST", body: form, timeout: 120000 });
+      state.uploaded = true;
+      text("operationStatus", "업로드 완료. 분석 조건을 확인하고 시작하세요.");
+    } catch (error) {
+      showError(error.message);
+      text("operationStatus", "업로드하지 못했습니다. 파일을 다시 선택하세요.");
+    } finally { setBusy(false); }
+  }
+
+  function loadResultImages() {
+    const version = Date.now();
+    document.querySelectorAll("[data-result-image]").forEach((image) => {
+      const placeholder = image.parentElement.querySelector(".chart-placeholder, .image-empty");
+      image.onload = () => { image.hidden = false; if (placeholder) placeholder.hidden = true; };
+      image.onerror = () => {
+        image.hidden = true;
+        if (placeholder) {
+          placeholder.hidden = false;
+          const label = placeholder.querySelector("p") || placeholder;
+          label.textContent = "이 분석의 이미지가 생성되지 않았습니다.";
+        }
+      };
+      image.loading = "eager";
+      image.src = `/api/static/${image.dataset.resultImage}?v=${version}`;
+    });
+  }
+
+  function renderResult(data) {
+    const { fem, sam2, uncertainty } = data.result;
+    state.result = data;
+    const grades = {
+      Safe: ["safe", "안전", "현재 해석에서는 안전 등급으로 분류되었습니다."],
+      Warning: ["warning", "경고", "경고 등급의 해석 요소가 있습니다."],
+      Critical: ["critical", "위험", "위험 등급의 해석 요소가 확인되었습니다."],
+    };
+    const grade = grades[data.result.grade] || ["idle", data.result.grade, "분석 결과를 확인하세요."];
+    $("gradeBanner").dataset.grade = grade[0];
+    text("gradeBadge", `종합 등급 · ${grade[1]}`); text("gradeTitle", grade[2]);
+    text("gradeDescription", `${data.scenario_info.name} · ${data.mesh_resolution} 격자 · 최대 응력비 ${format(fem.max_ratio * 100)}%`);
+    text("maxStress", format(fem.max_stress_MPa, 4));
+    text("meanStress", `MPa · 평균 ${format(fem.mean_stress_MPa, 4)}`);
+    text("maxRatio", format(fem.max_ratio, 4));
+    text("crackRatio", `${format(sam2.crack_ratio * 100)}%`);
+    text("crackPixels", `${format(sam2.crack_pixels, 0)}개 균열 픽셀`);
+    text("criticalCount", format(fem.critical, 0));
+    text("totalElements", `전체 ${format(fem.total, 0)}개 중`);
+    text("distributionText", `안전 ${format(fem.safe, 0)} · 경고 ${format(fem.warning, 0)} · 위험 ${format(fem.critical, 0)}`);
+    text("resultScenario", data.scenario_info.name);
+    text("resultDate", data.capture_date); text("resultMesh", data.mesh_resolution);
+    text("resultInput", data.input_mode === "csv_absolute" ? "CSV 절대온도" : "이미지 그레이스케일");
+    const props = data.props;
+    text("resultProps", `E ${format(props.E)} MPa / ν ${format(props.nu)} / α ${format(props.alpha * 1e5)} ×10⁻⁵ /K / Sₜ ${format(props.S_t)} MPa`);
+    text("temperatureUncertainty", `±${format(uncertainty.delta_T_C)} °C`);
+    text("stressRange", `${format(uncertainty.stress_range_MPa[0], 4)} ~ ${format(uncertainty.stress_range_MPa[1], 4)} MPa`);
+    text("ratioRange", `${format(uncertainty.SR_range[0], 4)} ~ ${format(uncertainty.SR_range[1], 4)}`);
+    text("verificationV1", `${format(data.verification.V1_error_pct)}%`);
+    text("verificationV2", `${format(data.verification.V2_tsrst_error_pct)}%`);
+    text("diagnosisContent", "분석이 완료되었습니다. AI 진단을 생성할 수 있습니다.");
+    $("chatMessages").replaceChildren();
+    loadResultImages(); refreshControls();
+  }
+
+  function renderDiagnosis(message) {
+    const container = $("diagnosisContent");
+    container.classList.remove("muted"); container.replaceChildren();
+    let paragraph = null, list = null;
+    // Build DOM nodes instead of injecting model text as HTML.
+    for (const line of message.split(/\r?\n/)) {
+      if (!line.trim()) { paragraph = null; list = null; continue; }
+      const heading = line.match(/^#{1,6}\s+(.+)/);
+      const item = line.match(/^(?:[-*]|\d+[.)])\s+(.+)/);
+      if (heading) {
+        const node = document.createElement("h4"); node.textContent = heading[1]; container.append(node);
+        paragraph = null; list = null;
+      } else if (item) {
+        if (!list) { list = document.createElement("ul"); container.append(list); }
+        const node = document.createElement("li"); node.textContent = item[1]; list.append(node); paragraph = null;
+      } else {
+        if (!paragraph) { paragraph = document.createElement("p"); container.append(paragraph); }
+        paragraph.append(document.createTextNode((paragraph.textContent ? " " : "") + line)); list = null;
+      }
+    }
+  }
+
+  async function diagnose() {
+    setBusy(true, "AI 진단을 생성하고 있습니다. 수 분이 걸릴 수 있습니다…");
+    text("diagnosisContent", "분석 데이터를 바탕으로 AI 보고서를 작성하고 있습니다…");
+    try {
+      const data = await request("/diagnose", { timeout: 600000 });
+      if (typeof data.diagnosis !== "string" || !data.diagnosis.trim()) throw new Error("AI 진단 응답이 비어 있습니다.");
+      if (/^[❌⚠]/u.test(data.diagnosis)) throw new Error(data.diagnosis);
+      renderDiagnosis(data.diagnosis);
+      text("operationStatus", "분석과 AI 진단이 완료되었습니다.");
+    } catch (error) {
+      text("diagnosisContent", "AI 진단을 생성하지 못했습니다. 위 분석 결과는 확인할 수 있으며, 진단 생성 버튼으로 다시 시도할 수 있습니다.");
+      text("operationStatus", "분석 완료 · AI 진단은 다시 시도할 수 있습니다.");
+      showError(error.message);
+    } finally { setBusy(false); }
+  }
+
+  $("analysisForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (state.busy || !state.uploaded || !$("analysisForm").reportValidity()) return;
+    if (!state.health.sam2 && extension(state.file) !== "csv") {
+      showError("SAM2 모델이 준비되지 않았습니다. 서버 로그를 확인하세요."); return;
+    }
+    showError();
+    setBusy(true, "균열 검출과 FEM 열응력 분석을 진행하고 있습니다…");
+    $("workspace").classList.add("has-file");
+    const params = new URLSearchParams({ scenario: $("scenario").value, mesh_size: $("meshSize").value });
+    if ($("captureDate").value) params.set("capture_date", $("captureDate").value);
+    if ($("customProps").checked) {
+      for (const [key, id, scale] of [["e_override", "elasticModulus", 1], ["nu_override", "poissonRatio", 1], ["alpha_override", "thermalExpansion", 1e-5], ["st_override", "tensileStrength", 1]]) {
+        params.set(key, Number($(id).value) * scale);
+      }
+    }
+    try {
+      const result = await request(`/analyze?${params}`, { timeout: 300000 });
+      renderResult(result);
+      $("resultsHeading").focus({ preventScroll: true });
+      text("operationStatus", "분석이 완료되었습니다.");
+      if ($("autoDiagnose").checked) await diagnose();
+    } catch (error) {
+      showError(error.message); text("operationStatus", "분석하지 못했습니다. 조건을 확인하고 다시 시도하세요.");
+    } finally { setBusy(false); }
+  });
+  const guideDialog = $("guideDialog");
+  $("guideButton").addEventListener("click", () => guideDialog.showModal());
+  $("guideCloseButton").addEventListener("click", () => guideDialog.close());
+  guideDialog.addEventListener("click", (event) => { if (event.target === guideDialog) guideDialog.close(); });
+
+  $("diagnoseButton").addEventListener("click", () => {
+    if (!state.busy && state.result) { showError(); void diagnose(); }
+  });
+  $("fileInput").addEventListener("change", (event) => { void selectFile(event.target.files[0]); });
+  $("clearFileButton").addEventListener("click", () => { if (!state.busy) clearSelection(); });
+  $("customProps").addEventListener("change", refreshControls);
+  $("scenario").addEventListener("change", () => text("scenarioDescription", state.scenarios[$("scenario").value]?.desc || "선택한 조건으로 분석합니다."));
+  for (const name of ["dragenter", "dragover"]) $("dropZone").addEventListener(name, (event) => {
+    event.preventDefault(); if (!state.busy) $("dropZone").classList.add("is-dragging");
+  });
+  for (const name of ["dragleave", "drop"]) $("dropZone").addEventListener(name, (event) => {
+    event.preventDefault(); $("dropZone").classList.remove("is-dragging");
+    if (name === "drop") void selectFile(event.dataTransfer.files[0]);
+  });
+  $("downloadButton").addEventListener("click", () => {
+    if (!state.result) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(state.result, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a"); anchor.href = url;
+    anchor.download = `${state.file.name.replace(/\.[^.]+$/, "")}_analysis.json`;
+    document.body.append(anchor); anchor.click(); anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
+  function appendChat(role, message) {
+    $("chatMessages").querySelector(".chat-empty")?.remove();
+    const node = document.createElement("p"); node.className = "chat-message";
+    node.dataset.role = role; node.textContent = message;
+    $("chatMessages").append(node); $("chatMessages").scrollTop = $("chatMessages").scrollHeight;
+    return node;
+  }
+
+  $("chatForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const message = $("chatInput").value.trim();
+    if (!message || state.busy || !state.result) return;
+    showError(); appendChat("user", message); $("chatInput").value = "";
+    const waiting = appendChat("assistant", "답변을 작성하고 있습니다…");
+    setBusy(true, "분석 결과에 대한 답변을 작성하고 있습니다…");
+    try {
+      const data = await request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }), timeout: 180000 });
+      if (typeof data.reply !== "string" || !data.reply.trim()) throw new Error("답변이 비어 있습니다.");
+      if (/^[❌⚠]/u.test(data.reply)) throw new Error(data.reply);
+      waiting.textContent = data.reply; text("operationStatus", "답변이 도착했습니다.");
+    } catch (error) {
+      waiting.dataset.role = "error"; waiting.textContent = error.message;
+      text("operationStatus", "답변을 생성하지 못했습니다. 다시 질문할 수 있습니다.");
+    } finally { setBusy(false); }
+  });
+
+  async function initialize() {
+    $("previewNotice").hidden = !previewOnly;
+    showError();
+    refreshControls();
+    if (previewOnly) {
+      $("previewNotice").hidden = false;
+      $("connectionStatus").dataset.state = "checking"; text("connectionText", "디자인 미리보기");
+      return;
+    }
+    try {
+      state.health = await request("/", { timeout: 15000 });
+      $("connectionStatus").dataset.state = state.health.sam2 ? "ready" : "warning";
+      text("connectionText", state.health.sam2 ? "분석 서버 연결됨" : "SAM2 준비 필요");
+      refreshControls();
+      try {
+        state.scenarios = await request("/scenarios");
+        for (const option of $("scenario").options) if (state.scenarios[option.value]) option.title = state.scenarios[option.value].desc;
+        text("scenarioDescription", state.scenarios[$("scenario").value]?.desc);
+      } catch { /* Static scenario labels remain usable. */ }
+    } catch (error) {
+      $("connectionStatus").dataset.state = "error"; text("connectionText", "서버 연결 확인 필요");
+      showError(error.message);
+    }
+  }
+  void initialize();
+})();

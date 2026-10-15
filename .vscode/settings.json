@@ -1,4 +1,13 @@
 {
+    "python.defaultInterpreterPath": "C:\\Users\\rhd30\\anaconda3\\envs\\SOC\\python.exe",
+    "files.exclude": {
+        "**/__pycache__": true
+    },
+    "search.exclude": {
+        "past": true,
+        "result": true,
+        "weights": true
+    },
     "python-envs.pythonProjects": [
         {
             "path": ".",

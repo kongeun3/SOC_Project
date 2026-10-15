@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ko"><head>
+
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="열화상 이미지와 온도 데이터를 이용한 도로 포장 열응력 진단">
+  <title>SOC · 도로 포장 진단</title>
+  <link rel="icon" href="data:,">
+  
+  
+  
+  
+
+  
+<link rel="stylesheet" href="style.css"></head>
+<body>
+  <!-- Design freely. Keep IDs, input names and data-* attributes used by app.js. -->
+  <a class="skip-link" href="#workspace">분석 화면으로 건너뛰기</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="#" aria-label="SOC 홈" style="height: 44px;">
+        <span class="brand-symbol" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M9 3 4 29h24L23 3Z"></path><path class="road-mark" d="M16 6v5m0 4v5m0 4v4"></path></svg></span>
+        <span class="brand-name">길바닥연구소</span>
+      </a>
+      <nav class="header-nav" aria-label="주 메뉴"><a class="nav-active" href="#workspace">포장 진단</a><button class="nav-guide-button" id="guideButton" type="button" aria-haspopup="dialog" aria-controls="guideDialog">사용 안내</button></nav>
+      <span id="connectionStatus" class="connection-pill" data-state="checking" role="status"><span class="status-dot"></span><span id="connectionText">디자인 미리보기</span></span>
+    </div>
+  </header>
+
+  <main class="page-shell" id="workspace">
+    <div class="page-heading">
+      <div><p class="eyebrow">THERMAL STRESS ANALYSIS</p><h1 class="">도로의 상태를, 데이터로 읽다.</h1><p class="page-description">열화상 이미지에서 응력 분포와 균열 위험도를 확인하세요.</p></div>
+      <span class="heading-note">이미지 · CSV 분석</span>
+    </div>
+    <div id="previewNotice" class="notice">디자인 미리보기입니다. 실제 분석은 <code>python main2.py</code>로 서버를 실행한 뒤 이용하세요.</div>
+    <noscript><p class="notice">파일 업로드와 분석을 사용하려면 브라우저의 JavaScript를 활성화하세요.</p></noscript>
+
+    <div class="workspace-grid">
+      <aside class="input-column" aria-label="파일 및 분석 설정">
+        <form id="analysisForm" class="">
+          <fieldset id="inputSettings" class="form-fieldset" disabled="">
+            <section class="panel input-panel section-jf7ggr" style="position: relative; height: 710px;">
+              <div class="section-heading"><span class="step-number">01</span><div><h2>분석 파일</h2><p>현장의 열화상 데이터를 선택하세요.</p></div></div>
+              <input id="fileInput" class="visually-hidden" type="file" accept=".png,.jpg,.jpeg,.csv,.tif,.tiff,.bmp" aria-label="분석할 이미지 또는 CSV 선택">
+              <label id="dropZone" class="drop-zone" for="fileInput">
+                <span class="upload-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4M4 15v5h16v-5"></path></svg></span>
+                <strong class="">파일을 끌어 놓거나 선택하세요</strong><span class="">열화상 이미지 또는 온도 CSV</span><span class="file-types">JPG · PNG · TIFF · BMP · CSV</span>
+              </label>
+              <div id="selectedFile" class="selected-file" hidden="">
+                <img id="filePreview" class="file-preview" alt="선택한 이미지 미리보기" hidden="">
+                <div class="selected-file-info"><strong id="fileName"></strong><span id="fileMeta"></span></div>
+                <button id="clearFileButton" class="icon-button" type="button" aria-label="선택한 파일 지우기">×</button>
+              </div>
+              
+              
+              
+            </section>
+
+            <section class="panel input-panel" style="height: auto !important; min-height: 694px !important;">
+              <div class="section-heading"><span class="step-number">02</span><div><h2 class="">분석 조건</h2><p>현장 분석은 기본 설정을 권장합니다.</p></div></div>
+              <label class="field-label" for="scenario">분석 시나리오</label>
+              <label class="field-label" for="captureDate">촬영일 <span>선택</span></label><input id="captureDate" name="capture_date" type="date" aria-describedby="captureDateHint" class=""><p id="captureDateHint" class="field-hint">알고 있는 촬영일을 입력하면 분석 조건에 반영됩니다.</p><select id="scenario" name="scenario" class=""><option value="default">현장 분석 · 기본</option><option value="v1">V1 · 수학적 무결성 검증</option><option value="v2">V2 · TSRST 벤치마크</option><option value="v3">V3 · 극한 위험 탐지</option></select>
+              <p id="scenarioDescription" class="field-hint">현장 분석용 기본 파라미터</p>
+              <label class="field-label" for="meshSize">격자 해상도</label>
+              <select id="meshSize" name="mesh_size" class=""><option value="30">30 × 30 · 빠르게</option><option value="40" selected="">40 × 40 · 기본</option><option value="60">60 × 60 · 정밀하게</option><option value="80">80 × 80 · 고정밀</option></select>
+              <details class="advanced-settings" open=""><summary>물성 선택 및 상세 설정<span>선택</span></summary>
+                <label class="check-label"><input id="customProps" type="checkbox">물성치를 직접 지정하기</label>
+                <fieldset id="customFields" class="form-fieldset material-fields" disabled="">
+                  <label for="elasticModulus">탄성계수 E <span>MPa</span><input id="elasticModulus" type="number" value="5000" min="1000" max="20000" step="100" required=""></label>
+                  <label for="poissonRatio">포아송비 ν<input id="poissonRatio" type="number" value="0.30" min="0.15" max="0.45" step="0.01" required=""></label>
+                  <label for="thermalExpansion">열팽창 계수 α <span>×10⁻⁵ /K</span><input id="thermalExpansion" type="number" value="2.0" min="1" max="3" step="0.1" required="" class=""></label>
+                  <label for="tensileStrength">인장강도 Sₜ <span>MPa</span><input id="tensileStrength" type="number" value="2.8" min="1" max="5" step="0.1" required="" class=""></label>
+                </fieldset>
+              </details>
+              <label class="check-label auto-diagnosis"><input id="autoDiagnose" type="checkbox" checked="">분석 후 AI 진단 자동 생성</label>
+            </section>
+          </fieldset>
+          <div class="panel run-panel">
+            <button id="analyzeButton" class="button button-primary" type="submit" disabled=""><span>분석 시작</span><span aria-hidden="true">→</span></button>
+            <p id="operationStatus" class="operation-status" role="status" aria-live="polite">분석할 파일을 먼저 선택하세요.</p>
+            <progress id="operationProgress" aria-label="작업 진행 중" hidden="" class=""></progress>
+            <p id="errorMessage" class="error-message" role="alert" hidden=""></p>
+          </div>
+        </form>
+        
+      </aside>
+
+      <section class="results-column" aria-labelledby="resultsHeading">
+        <div class="results-heading"><h2 id="resultsHeading" tabindex="-1">분석 결과</h2><button id="downloadButton" class="button button-secondary" type="button" disabled="">결과 JSON 다운로드 <span aria-hidden="true">↓</span></button></div>
+        <section id="gradeBanner" class="panel grade-banner" data-grade="idle" aria-labelledby="gradeTitle">
+          <div class="grade-symbol" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="m4 23 7-7 6 4 11-13M21 7h7v7"></path></svg></div>
+          <div class="grade-copy"><span id="gradeBadge" class="grade-badge">분석 대기</span><h3 id="gradeTitle" class="">현장 데이터에서 진단이 시작됩니다.</h3><p id="gradeDescription" class="">왼쪽에서 파일과 조건을 선택하면 위험도와 분석 결과를 확인할 수 있습니다.</p></div>
+        </section>
+
+        <div class="metric-grid">
+          <article class="panel metric-card"><p>최대 주응력</p><strong id="maxStress">—</strong><span id="meanStress">단위 MPa</span></article>
+          <article class="panel metric-card"><p>최대 응력비</p><strong id="maxRatio">—</strong><span>인장강도 대비 응력</span></article>
+          <article class="panel metric-card"><p>검출 균열 비율</p><strong id="crackRatio">—</strong><span id="crackPixels">이미지 면적 기준</span></article>
+          <article class="panel metric-card"><p>위험 요소</p><strong id="criticalCount">—</strong><span id="totalElements">전체 해석 요소 기준</span></article>
+        </div>
+
+        <div class="chart-grid">
+          <figure class="panel chart-panel"><figcaption><span class="">응력비와 위험 수준</span><small>STRESS RATIO</small></figcaption><div class="chart-frame"><div class="chart-placeholder"><span class="placeholder-gauge" aria-hidden="true"></span><p>분석 후 위험도 게이지가 표시됩니다.</p></div><img id="gaugeImage" data-result-image="gauge.png" alt="최대 응력비 위험도 게이지" hidden="" class=""></div><div class="risk-legend"><span><i class="dot-safe"></i>안전 &lt; 0.7</span><span class=""><i class="dot-warning"></i>경고 0.7–1.0</span><span><i class="dot-critical"></i>위험 ≥ 1.0</span></div></figure>
+          <figure class="panel chart-panel"><figcaption><span>해석 요소 분포</span><small>RISK DISTRIBUTION</small></figcaption><div class="chart-frame"><div class="chart-placeholder"><span class="placeholder-donut" aria-hidden="true"></span><p>안전·경고·위험 요소의 비율을 보여줍니다.</p></div><img id="donutImage" data-result-image="donut.png" alt="위험 등급별 해석 요소 분포" hidden="" class=""></div><p id="distributionText" class="chart-caption">파일을 분석하면 분포가 표시됩니다.</p></figure>
+        </div>
+
+        <section class="panel ai-panel" aria-labelledby="aiHeading">
+          <div class="panel-heading"><div><p class="eyebrow">AI INSIGHT</p><h3 id="aiHeading">데이터를 해석하는 한 걸음 더</h3></div><button id="diagnoseButton" class="button button-outline" type="button" disabled="">AI 진단 생성</button></div>
+          <div id="diagnosisContent" class="diagnosis-content" aria-live="polite"><p class="muted">분석이 끝나면 결과를 바탕으로 종합 진단을 생성할 수 있습니다.</p></div>
+        </section>
+
+        <details class="panel result-details"><summary>측정 조건 · 불확실성 · 수치 검증<span>자세히 보기</span></summary><div class="detail-grid">
+          <section><h3>적용 조건</h3><dl><div><dt>시나리오</dt><dd id="resultScenario">—</dd></div><div><dt>촬영일</dt><dd id="resultDate">—</dd></div><div><dt>격자 해상도</dt><dd id="resultMesh">—</dd></div><div><dt>입력 방식</dt><dd id="resultInput">—</dd></div><div><dt>물성치</dt><dd id="resultProps">—</dd></div></dl></section>
+          <section><h3>센서 오차와 검증</h3><dl><div><dt>온도 오차</dt><dd id="temperatureUncertainty">—</dd></div><div><dt>응력 범위</dt><dd id="stressRange">—</dd></div><div><dt>응력비 범위</dt><dd id="ratioRange">—</dd></div><div><dt>V1 이론해 오차</dt><dd id="verificationV1">—</dd></div><div><dt>V2 TSRST 오차</dt><dd id="verificationV2">—</dd></div></dl></section>
+        </div></details>
+
+        <details class="panel result-details" id="visualDetails"><summary>균열 검출 과정 · 위험 위치<span>이미지 보기</span></summary><div class="visual-grid">
+          <figure><figcaption>분석 파이프라인</figcaption><p class="image-empty">분석 후 생성된 이미지가 표시됩니다.</p><img data-result-image="pipeline_result.png" alt="원본·균열 검출·마스크 확장·온도 행렬" loading="lazy" hidden=""></figure>
+          <figure><figcaption>위험 위치 오버레이</figcaption><p class="image-empty">분석 후 생성된 이미지가 표시됩니다.</p><img data-result-image="risk_overlay.png" alt="원본 이미지 위에 표시한 위험 위치" loading="lazy" hidden=""></figure>
+          <figure><figcaption>FEM 해석 결과</figcaption><p class="image-empty">분석 후 생성된 이미지가 표시됩니다.</p><img data-result-image="fem_results.png" alt="온도·주응력·응력비·위험 등급 분포" loading="lazy" hidden=""></figure>
+        </div></details>
+
+        <section class="panel chat-panel" aria-labelledby="chatHeading"><div class="panel-heading"><div><p class="eyebrow">ASK ABOUT YOUR RESULTS</p><h3 id="chatHeading">분석 결과에 대해 질문하세요.</h3></div></div><div id="chatMessages" class="chat-messages" role="log" aria-live="polite"><p class="muted chat-empty">분석을 완료하면 후속 질문을 할 수 있습니다.</p></div><form id="chatForm" class="chat-form"><label class="visually-hidden" for="chatInput">분석 결과에 대한 질문</label><input id="chatInput" type="text" placeholder="예: 다음 점검에서 무엇을 확인하면 좋을까요?" maxlength="2000" required="" disabled=""><button id="chatButton" class="button button-primary" type="submit" disabled="">질문 보내기</button></form></section>
+      </section>
+    </div>
+
+    <dialog id="guideDialog" class="guide-dialog" aria-labelledby="guideDialogTitle"><div class="guide-dialog-inner"><div class="guide-dialog-heading"><h2 id="guideDialogTitle">처음 사용하는 분을 위한 안내</h2><button id="guideCloseButton" class="dialog-close" type="button" aria-label="사용 안내 닫기">×</button></div><div class="guide-grid"><article><span>01</span><h3>파일을 준비하세요.</h3><p>열화상 이미지 또는 온도가 담긴 CSV를 선택합니다. 테스트에는 프로젝트의 test/test.jpg를 사용할 수 있습니다.</p></article><article><span>02</span><h3>분석 조건을 확인하세요.</h3><p>촬영일을 알고 있다면 입력하세요. 처음에는 현장 분석과 기본 격자 해상도로 시작하면 됩니다.</p></article><article><span>03</span><h3>결과를 함께 살펴보세요.</h3><p>응력비와 위험 요소 분포를 확인하고, AI 진단을 통해 해석과 후속 점검 항목을 확인하세요.</p></article></div></div></dialog>
+    
+</main>
+
+<script src="app.js"></script></body></html>
